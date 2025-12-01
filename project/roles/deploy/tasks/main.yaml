@@ -1,0 +1,35 @@
+---
+# ─────────────────────────────────────────────
+# deploy: K3s 클러스터 애플리케이션 배포
+# ─────────────────────────────────────────────
+
+- name: Ensure K3s is installed
+  shell: which k3s
+  register: k3s_check
+  failed_when: k3s_check.rc != 0
+
+- name: Copy application manifests
+  copy:
+    src: ../../files/app-manifests/
+    dest: /tmp/app-manifests/
+    mode: '0644'
+
+- name: Apply manifests to K3s cluster
+  shell: |
+    kubectl apply -f /tmp/app-manifests/
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+
+- name: Wait for pods to become ready
+  shell: |
+    kubectl wait --for=condition=Ready pod --all --timeout=120s -A
+  ignore_errors: yes
+
+- name: Display running services
+  shell: kubectl get pods -A -o wide
+  register: deploy_output
+
+- debug:
+    var: deploy_output.stdout
+

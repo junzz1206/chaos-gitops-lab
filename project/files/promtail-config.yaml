@@ -1,0 +1,37 @@
+# ─────────────────────────────────────────────
+# promtail-config.yaml — Promtail 설정 템플릿
+# ─────────────────────────────────────────────
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # ────────────────
+  # 시스템 로그 수집
+  # ────────────────
+  - job_name: system-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          host: "{{ ansible_hostname }}"
+          __path__: /var/log/*.log
+
+  # ────────────────
+  # K3s 컨테이너 로그 수집
+  # ────────────────
+  - job_name: k3s-container-logs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: k3s
+          __path__: /var/lib/rancher/k3s/agent/containerd/io.containerd.logs/**/*.log
+

@@ -1,0 +1,38 @@
+---
+# ─────────────────────────────────────────────
+# app-deploy.yaml — K3s 클러스터 앱 배포 플레이북
+# ─────────────────────────────────────────────
+- name: 🚀 Deploy Application to K3s
+  hosts: k3s_master                   # K3s 서버 노드에서 실행
+  become: yes
+  vars:
+    app_manifest_dir: "../../files/app-manifests"
+  tasks:
+    - name: Ensure kubectl is installed
+      shell: which kubectl
+      register: kubectl_check
+      failed_when: kubectl_check.rc != 0
+
+    - name: Copy app manifests to target
+      copy:
+        src: "{{ app_manifest_dir }}/"
+        dest: /tmp/app-manifests/
+        mode: '0644'
+
+    - name: Apply manifests to cluster
+      shell: kubectl apply -f /tmp/app-manifests/
+      args:
+        executable: /bin/bash
+
+    - name: Wait until all pods are running
+      shell: |
+        kubectl wait --for=condition=Ready pods --all --timeout=120s -A
+      args:
+        executable: /bin/bash
+
+    - name: Display deployed resources
+      shell: kubectl get pods -A -o wide
+      register: pods
+    - debug:
+        var: pods.stdout
+

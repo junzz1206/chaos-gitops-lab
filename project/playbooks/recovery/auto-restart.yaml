@@ -1,0 +1,24 @@
+---
+# ─────────────────────────────────────────────
+# auto-restart.yaml — 장애 자동 복구 처리
+# ─────────────────────────────────────────────
+- name: 🔁 Auto Restart Service
+  hosts: all
+  become: yes
+  vars:
+    service_name: "nginx"             # 복구 대상 서비스
+  tasks:
+    - name: Restart failed service
+      shell: |
+        systemctl restart {{ service_name }}
+      ignore_errors: yes
+
+    - name: Check service status
+      shell: systemctl is-active {{ service_name }}
+      register: svc_status
+      ignore_errors: yes
+
+    - name: Log service recovery result
+      debug:
+        msg: "Service {{ service_name }} status: {{ svc_status.stdout }}"
+

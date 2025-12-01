@@ -1,0 +1,27 @@
+---
+# ─────────────────────────────────────────────
+# recovery-handler.yaml — AlertManager 트리거 복구 핸들러
+# ─────────────────────────────────────────────
+- name: 🧩 Handle AlertManager Recovery Event
+  hosts: all
+  become: yes
+  vars:
+    alert_service: "nginx"
+  tasks:
+    - name: Log incoming alert trigger
+      debug:
+        msg: "Alert received from Prometheus AlertManager — restarting {{ alert_service }}"
+
+    - name: Restart affected service
+      shell: systemctl restart {{ alert_service }}
+      ignore_errors: yes
+
+    - name: Verify restart
+      shell: systemctl is-active {{ alert_service }}
+      register: check_restart
+      ignore_errors: yes
+
+    - name: Display result
+      debug:
+        msg: "Service {{ alert_service }} restarted: {{ check_restart.stdout }}"
+

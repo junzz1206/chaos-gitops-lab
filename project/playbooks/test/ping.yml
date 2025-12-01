@@ -1,0 +1,7 @@
+---
+- name: 🧩 Test Connection to K3s Nodes
+  hosts: k3s
+  become: false
+  tasks:
+    - name: Ping all nodes
+      ansible.builtin.ping:

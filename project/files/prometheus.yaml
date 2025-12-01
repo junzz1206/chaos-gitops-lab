@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────
+# prometheus.yml — Prometheus 설정 템플릿
+# ─────────────────────────────────────────────
+global:
+  scrape_interval: 15s              # 기본 스크랩 주기
+  evaluation_interval: 15s          # Alert 규칙 평가 주기
+
+# ─────────────────────────────────────────────
+# 알림 설정 (옵션: AlertManager와 연동)
+# ─────────────────────────────────────────────
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - "localhost:9093"       # AlertManager 주소
+
+# ─────────────────────────────────────────────
+# 규칙 파일 로드 (alert_rules.yml 등, 필요 시 추가)
+# ─────────────────────────────────────────────
+rule_files: []
+
+# ─────────────────────────────────────────────
+# 모니터링 대상 정의
+# ─────────────────────────────────────────────
+scrape_configs:
+  # Prometheus 자기 자신 모니터링
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Node Exporter (서버 자원 모니터링)
+  - job_name: "node-exporter"
+    static_configs:
+      - targets: ["localhost:9100"]
+
+  # K3s API Server 모니터링
+  - job_name: "k3s"
+    kubernetes_sd_configs:
+      - role: endpoints
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace]
+        action: keep
+        regex: default
+
+  # Loki 메트릭 수집
+  - job_name: "loki"
+    static_configs:
+      - targets: ["localhost:3100"]
+
+  # Custom App 모니터링 (예시)
+  - job_name: "app"
+    static_configs:
+      - targets: ["localhost:8080"]
+

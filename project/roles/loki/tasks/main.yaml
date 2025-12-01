@@ -1,0 +1,62 @@
+---
+# ─────────────────────────────────────────────
+# loki: Loki 로그 서버 및 Promtail 에이전트 설정
+# ─────────────────────────────────────────────
+
+- name: Ensure Docker is installed
+  become: yes
+  package:
+    name: docker
+    state: present
+
+- name: Pull Loki and Promtail images
+  become: yes
+  shell: |
+    docker pull grafana/loki:latest
+    docker pull grafana/promtail:latest
+  args:
+    executable: /bin/bash
+
+- name: Create Loki and Promtail config directories
+  file:
+    path: "/etc/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - loki
+    - promtail
+
+- name: Copy Loki configuration
+  copy:
+    src: ../../files/loki-config.yaml
+    dest: /etc/loki/config.yaml
+    mode: '0644'
+
+- name: Copy Promtail configuration
+  copy:
+    src: ../../files/promtail-config.yaml
+    dest: /etc/promtail/config.yaml
+    mode: '0644'
+
+- name: Run Loki container
+  shell: |
+    docker run -d --name loki \
+      -p 3100:3100 \
+      -v /etc/loki:/etc/loki \
+      grafana/loki:latest \
+      -config.file=/etc/loki/config.yaml
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+
+- name: Run Promtail container
+  shell: |
+    docker run -d --name promtail \
+      -v /etc/promtail:/etc/promtail \
+      -v /var/log:/var/log \
+      grafana/promtail:latest \
+      -config.file=/etc/promtail/config.yaml
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+

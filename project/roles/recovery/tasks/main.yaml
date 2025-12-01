@@ -1,0 +1,22 @@
+---
+# ─────────────────────────────────────────────
+# recovery: 장애 발생 시 자동 복구 처리
+# ─────────────────────────────────────────────
+
+- name: Restart failed services
+  become: yes
+  shell: |
+    systemctl daemon-reexec
+    systemctl restart {{ service_name | default('nginx') }}
+  ignore_errors: yes
+
+- name: Verify service status
+  become: yes
+  shell: systemctl is-active {{ service_name | default('nginx') }}
+  register: service_status
+  ignore_errors: yes
+
+- name: Log recovery result
+  debug:
+    msg: "Recovery completed for {{ service_name | default('nginx') }} with status: {{ service_status.stdout }}"
+

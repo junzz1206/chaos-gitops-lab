@@ -1,0 +1,24 @@
+---
+# ─────────────────────────────────────────────
+# rollback-deployment.yaml — 앱 배포 롤백
+# ─────────────────────────────────────────────
+- name: ⏪ Rollback K3s Deployment
+  hosts: k3s_master
+  become: yes
+  vars:
+    deployment_name: "web-deployment"
+    namespace: "default"
+  tasks:
+    - name: Rollback deployment to previous revision
+      shell: |
+        kubectl rollout undo deployment/{{ deployment_name }} -n {{ namespace }}
+      args:
+        executable: /bin/bash
+
+    - name: Confirm rollback status
+      shell: |
+        kubectl rollout status deployment/{{ deployment_name }} -n {{ namespace }} --timeout=60s
+      register: rollout_result
+    - debug:
+        var: rollout_result.stdout
+

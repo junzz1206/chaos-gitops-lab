@@ -1,0 +1,15 @@
+---
+# ─────────────────────────────────────────────
+# chaos_kill: 프로세스 종료 카오스 실험
+# ─────────────────────────────────────────────
+
+- name: Kill target process
+  become: yes
+  shell: |
+    pkill -f {{ target_process | default('nginx') }} || true
+  ignore_errors: yes                          # 해당 프로세스가 없을 경우 무시
+
+- name: Wait after killing process
+  wait_for:
+    timeout: "{{ duration | default(30) }}"   # 혼란 유지 시간 대기
+

@@ -1,0 +1,13 @@
+---
+# ────────────────────────────────
+# Chaos Role: Pod Kill (Kubernetes)
+# ────────────────────────────────
+- name: 💀 Delete target Pod
+  shell: |
+    POD=$(kubectl get pod -n {{ namespace }} -l app={{ target_pod }} -o name | head -n 1)
+    kubectl delete $POD -n {{ namespace }} --force --grace-period=0
+  ignore_errors: yes
+
+- debug:
+    msg: "✅ Pod {{ target_pod }} killed in namespace {{ namespace }}"
+

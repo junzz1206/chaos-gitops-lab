@@ -1,0 +1,52 @@
+---
+# ─────────────────────────────────────────────
+# monitoring: Prometheus + Grafana 설치 및 구성
+# ─────────────────────────────────────────────
+
+- name: Ensure Docker is installed
+  become: yes
+  package:
+    name: docker
+    state: present
+
+- name: Pull Prometheus and Grafana images
+  become: yes
+  shell: |
+    docker pull prom/prometheus:latest
+    docker pull grafana/grafana:latest
+  args:
+    executable: /bin/bash
+
+- name: Create Prometheus configuration directory
+  file:
+    path: /etc/prometheus
+    state: directory
+    mode: '0755'
+
+- name: Copy Prometheus configuration file
+  copy:
+    src: ../../files/prometheus.yml         # 로컬 files 디렉터리에서 가져옴
+    dest: /etc/prometheus/prometheus.yml
+    mode: '0644'
+
+- name: Run Prometheus container
+  shell: |
+    docker run -d --name prometheus \
+      -p 9090:9090 \
+      -v /etc/prometheus:/etc/prometheus \
+      prom/prometheus:latest
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+
+- name: Run Grafana container
+  shell: |
+    docker run -d --name grafana \
+      -p 3000:3000 \
+      -e "GF_SECURITY_ADMIN_USER=admin" \
+      -e "GF_SECURITY_ADMIN_PASSWORD=admin" \
+      grafana/grafana:latest
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+
