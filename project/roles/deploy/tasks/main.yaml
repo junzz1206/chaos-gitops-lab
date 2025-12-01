@@ -1,6 +1,6 @@
 ---
 # ─────────────────────────────────────────────
-# deploy: K3s 클러스터 애플리케이션 배포
+# deploy: K3s 클러스터 애플리케이션 배포 + Helm 통합
 # ─────────────────────────────────────────────
 
 - name: Ensure K3s is installed
@@ -33,3 +33,27 @@
 - debug:
     var: deploy_output.stdout
 
+
+# ─────────────────────────────────────────────
+# 🧩 Helm Integration Section
+# ─────────────────────────────────────────────
+
+- name: 🚀 Ensure Helm is installed
+  ansible.builtin.shell: |
+    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+
+- name: 🧱 Deploy application using Helm
+  ansible.builtin.command: >
+    helm upgrade --install my-app ./charts/my-app
+    --namespace default
+    --create-namespace
+  args:
+    chdir: "{{ playbook_dir }}/../../"  # charts 디렉터리 상대 경로 (project 루트)
+  register: helm_output
+
+- debug:
+    msg: |
+      🧩 Helm deployment complete!
+      {{ helm_output.stdout }}
