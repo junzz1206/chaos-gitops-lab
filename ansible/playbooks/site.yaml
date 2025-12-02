@@ -1,0 +1,6 @@
+- name: Base Ansible Playbook Example
+  hosts: all
+  become: yes
+  tasks:
+    - name: Test ping
+      ansible.builtin.ping:
