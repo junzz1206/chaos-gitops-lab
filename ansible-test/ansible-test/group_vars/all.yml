@@ -1,0 +1,5 @@
+target_namespace: online-boutique
+
+chaos_duration: 10s
+
+network_delay_ms: 300
