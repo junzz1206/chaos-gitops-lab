@@ -85,59 +85,59 @@ chaos-gitops-lab/
 
 ├── ansible/
 
-│   ├── inventory/
+│      ├── inventory/
 
-│   │   └── hosts.ini         # 미니 PC 접속 정보 (devuser 계정)
+│      │   └── hosts.ini         # 미니 PC 접속 정보 (devuser 계정)
 
-│   ├── playbooks/
+│      ├── playbooks/
 
-│   │   ├── setup/
+│      │   ├── setup/
 
-│   │   │   └── install_argocd.yml  # Argo CD 초기 설치용
+│      │   │   └── install_argocd.yml  # Argo CD 초기 설치용
 
-│   │   └── chaos/
+│      │   └── chaos/
 
-│   │       ├── run_chaos_test.yml  # Role을 조합하여 실행하는 카오스 시나리오
+│      │       ├── run_chaos_test.yml  # Role을 조합하여 실행하는 카오스 시나리오
+   
+│      │       └── restore_all.yml     # 장애 복구용 플레이북
 
-│   │       └── restore_all.yml     # 장애 복구용 플레이북
+│      └── roles/                # 카오스 기능별 모듈 (Tasks)
 
-│   └── roles/                # 카오스 기능별 모듈 (Tasks)
+│          ├── chaos_cpu/        # CPU 부하 주입 역할
 
-│       ├── chaos_cpu/        # CPU 부하 주입 역할
+│          │   └── tasks/main.yml
 
-│       │   └── tasks/main.yml
+│          ├── chaos_kill/       # 프로세스 강제 종료 역할
 
-│       ├── chaos_kill/       # 프로세스 강제 종료 역할
+│          │   └── tasks/main.yml
 
-│       │   └── tasks/main.yml
+│          ├── chaos_network/    # 네트워크 지연(Latency) 주입 역할
 
-│       ├── chaos_network/    # 네트워크 지연(Latency) 주입 역할
+│          │   └── tasks/main.yml
 
-│       │   └── tasks/main.yml
+│          └── chaos_pod/        # 팟(Pod) 삭제 역할
 
-│       └── chaos_pod/        # 팟(Pod) 삭제 역할
-
-│           └── tasks/main.yml
+   │           └── tasks/main.yml
 
 │
 
 ├── k8s-manifests/            # Argo CD가 바라보는 배포 상태(State)
 
-│   ├── online-boutique/      # 웹 애플리케이션 리소스
+│      ├── online-boutique/      # 웹 애플리케이션 리소스
 
-│   │   ├── deployment.yaml
+│      │   ├── deployment.yaml
 
-│   │   ├── service.yaml
+│      │   ├── service.yaml
 
-│   │   └── redis.yaml
+│      │   └── redis.yaml
 
-│   ├── monitoring/           # 모니터링 스택 (Prometheus/Grafana)
+│      ├── monitoring/           # 모니터링 스택 (Prometheus/Grafana)
 
-│   │   ├── Chart.yaml        # Helm Umbrella Chart 정의
+│      │   ├── Chart.yaml        # Helm Umbrella Chart 정의
 
-│   │   └── values.yaml       # Helm 설정값 (NodePort 등)
+│      │   └── values.yaml       # Helm 설정값 (NodePort 등)
 
-│   └── bootstrap.yaml        # (옵션) App of Apps 패턴 정의 파일
+│      └── bootstrap.yaml        # (옵션) App of Apps 패턴 정의 파일
 
 │
 
