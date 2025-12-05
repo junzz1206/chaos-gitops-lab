@@ -1,0 +1,20 @@
+apiVersion: v2
+name: monitoring
+description: Monitoring stack for k3s
+type: application
+version: 0.1.0
+
+dependencies:
+  - name: kube-prometheus-stack
+    version: "40.1.2"
+    repository: https://prometheus-community.github.io/helm-charts
+
+  - name: loki-simple-scalable
+    alias: loki
+    version: "1.8.11"
+    repository: https://grafana.github.io/helm-charts
+
+  - name: promtail
+    alias: promtail
+    version: "6.17.1"
+    repository: https://grafana.github.io/helm-charts
