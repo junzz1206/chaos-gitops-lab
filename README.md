@@ -25,18 +25,25 @@
 ###  서비스별 라벨 상세 (복사해서 사용하세요)
 **(1) frontend**
 `app: frontend` / `tier: frontend`
+
 **(2) productcatalogservice**
 `app: productcatalogservice` / `tier: backend`
+
 **(3) cartservice**
 `app: cartservice` / `tier: backend`
+
 **(4) checkoutservice**
 `app: checkoutservice` / `tier: backend`
+
 **(5) paymentservice**
 `app: paymentservice` / `tier: backend`
+
 **(6) shippingservice**
 `app: shippingservice` / `tier: backend`
+
 **(7) emailservice**
 `app: emailservice` / `tier: backend`
+
 **(8) redis-cart**
 `app: redis-cart` / `tier: data`
 
