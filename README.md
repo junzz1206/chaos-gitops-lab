@@ -81,6 +81,7 @@
 1. Chaos 테스트 전후로 [실행 플레이북, 지표 변화, 복구 여부, 시간]을 **Notion**에 반드시 기록한다.
 
 ### 기본 구조
+```text
 chaos-gitops-lab/
 ├── ansible/
 │   ├── inventory/
@@ -112,3 +113,4 @@ chaos-gitops-lab/
 │   └── bootstrap.yaml        # (옵션) App of Apps 패턴 정의 파일
 │
 └── README.md                 # 운영 규칙 및 아키텍처 설명
+```
