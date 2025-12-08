@@ -1,1 +1,101 @@
-# chaos_cpu tasks will be added here
+# ─────────────────────────────────────────────
+# roles/chaos_cpu/tasks/main.yml
+# 목적: checkoutservice 및 backend 계층 전체에 CPU 부하 주입
+# 표준 변수:
+#   - target_namespace: Chaos 대상 네임스페이스 (기본: app)
+#   - chaos_duration: 부하 유지 시간 (기본: 10s)
+#   - chaos_log_path: Chaos 실행 로그 경로 (기본: /var/log/chaos_test.log)
+# ─────────────────────────────────────────────
+
+# Step 1️⃣: Safety Check
+- name: 🧩 Safety Check - Namespace Validation
+  ansible.builtin.assert:
+    that:
+      - target_namespace == "app"
+    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 내에서만 수행해야 합니다."
+    success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
+
+# Step 2️⃣: Set defaults
+- name: ⚙️ Set default variables
+  ansible.builtin.set_fact:
+    chaos_duration: "{{ chaos_duration | default('10s') }}"
+    chaos_log_path: "/var/log/chaos_test.log"
+  changed_when: false
+
+# Step 3️⃣: Log start message
+- name: 🧾 Announce CPU Stress Test start
+  ansible.builtin.debug:
+    msg: |
+      🚀 CPU 부하 주입 시작
+      - 네임스페이스: {{ target_namespace }}
+      - 유지 시간: {{ chaos_duration }}
+      - 로그 경로: {{ chaos_log_path }}
+
+# Step 4️⃣: checkoutservice Pod 부하 주입
+- name: 🔥 Inject CPU Load into checkoutservice
+  ansible.builtin.shell: |
+    POD=$(kubectl get pod -n {{ target_namespace }} -l app=checkoutservice -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "$POD" ]; then
+      echo "[LOAD] checkoutservice pod=$POD"
+      kubectl exec -n {{ target_namespace }} $POD -- bash -c "yes > /dev/null & sleep {{ chaos_duration }} && pkill yes || true"
+    else
+      echo "[SKIP] checkoutservice Pod 없음"
+    fi
+  register: checkout_cpu_result
+  ignore_errors: yes
+  changed_when: true
+
+# Step 5️⃣: backend tier 전체 부하 주입
+- name: 💪 Inject CPU Stress to all backend services
+  ansible.builtin.shell: |
+    pods=$(kubectl get pods -n {{ target_namespace }} -l 'tier=backend' -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    if [ -z "$pods" ]; then
+      echo "[SKIP] backend tier Pod 없음"
+    else
+      for pod in $pods; do
+        echo "[LOAD] backend pod=$pod"
+        kubectl exec -n {{ target_namespace }} $pod -- bash -c "yes > /dev/null & sleep {{ chaos_duration }} && pkill yes || true"
+      done
+    fi
+  register: backend_cpu_result
+  ignore_errors: yes
+  changed_when: true
+
+# Step 6️⃣: Wait for stabilization
+- name: ⏳ Pause after CPU stress
+  ansible.builtin.pause:
+    seconds: "{{ (chaos_duration | regex_replace('s$','') | int) + 3 }}"
+
+# Step 7️⃣: Verify Pod recovery
+- name: 🔁 Check for non-running pods after CPU stress
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase!=Running -o wide --no-headers || true
+  register: non_running_pods
+  changed_when: false
+  ignore_errors: yes
+
+- name: 📊 Summarize pod states
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} --no-headers | awk '{print $3}' | sort | uniq -c
+  register: pod_state_summary
+  changed_when: false
+  ignore_errors: yes
+
+# Step 8️⃣: Log to file
+- name: 🪶 Write CPU stress summary to log file
+  ansible.builtin.lineinfile:
+    path: "{{ chaos_log_path }}"
+    create: true
+    line: |
+      [{{ ansible_date_time.iso8601 }}] ChaosCPU: ns={{ target_namespace }} duration={{ chaos_duration }} checkout_rc={{ checkout_cpu_result.rc }} backend_rc={{ backend_cpu_result.rc }} non_running="{{ non_running_pods.stdout | default('All Running') | replace('\n','; ') }}"
+  become: true
+
+# Step 9️⃣: Display summary
+- name: ✅ Final CPU Chaos Summary
+  ansible.builtin.debug:
+    msg: |
+      ✅ CPU Chaos 완료
+      - checkoutservice RC: {{ checkout_cpu_result.rc }}
+      - backend tier RC: {{ backend_cpu_result.rc }}
+      - 비정상 Pod 요약: {{ pod_state_summary.stdout | default('All Running') }}
+

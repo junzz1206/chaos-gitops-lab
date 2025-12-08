@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────
+# playbooks/chaos/run_pod_kill.yml
+# 목적:
+#   - app 네임스페이스 내 임의의 Pod 여러 개를 무작위로 삭제
+#   - Chaos Monkey 스타일 실험 수행
+#   - 삭제 결과를 로그로 남기고 상태 확인 수행
+# 표준 변수:
+#   target_namespace, random_pod_kill_count, chaos_log_path, recovery_wait
+# ─────────────────────────────────────────────
+
+- name: 🧨 Run Random Pod Kill Chaos
+  hosts: k3s_master
+  become: yes
+  vars:
+    target_namespace: "app"
+    random_pod_kill_count: "{{ random_pod_kill_count | default(2) }}"
+    recovery_wait: 10
+    chaos_log_path: "/var/log/chaos_test.log"
+
+  tasks:
+    # Step 1️⃣: Safety Check
+    - name: 🧩 Validate namespace
+      ansible.builtin.assert:
+        that:
+          - target_namespace == "app"
+        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 수행됩니다."
+        success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
+
+    # Step 2️⃣: Display test parameters
+    - name: 🧾 Print chaos configuration
+      ansible.builtin.debug:
+        msg: |
+          🧨 Random Pod Kill Chaos 시작
+          - 네임스페이스: {{ target_namespace }}
+          - 무작위 삭제 개수: {{ random_pod_kill_count }}
+
+    # Step 3️⃣: Execute Pod Kill Role
+    - name: 💀 Execute chaos_pod role
+      ansible.builtin.include_role:
+        name: chaos_pod
+      ignore_errors: yes
+      register: pod_kill_result
+
+    # Step 4️⃣: Wait for stabilization
+    - name: ⏳ Wait before verifying pod recovery
+      ansible.builtin.pause:
+        seconds: "{{ recovery_wait }}"
+
+    # Step 5️⃣: Verify pod status
+    - name: 🔍 Verify current pod state
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ target_namespace }} -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
+      register: pod_state
+      changed_when: false
+      ignore_errors: yes
+
+    # Step 6️⃣: Display results
+    - name: 🧾 Print pod state summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ Random Pod Kill Chaos 결과
+          {{ pod_state.stdout | default('Pod 상태 정보를 가져올 수 없습니다.') }}
+
+    # Step 7️⃣: Log chaos result
+    - name: 🪶 Write chaos summary to log file
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path }}"
+        create: yes
+        line: |
+          [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ random_pod_kill_count }} result="{{ pod_state.stdout | replace('\n','; ') }}"
+      become: true
+

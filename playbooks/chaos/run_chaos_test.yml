@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────
+# playbooks/chaos/run_chaos_test.yml
+# 목적: 전체 Chaos 시나리오 병렬 오케스트레이션
+# 특징:
+#   - Pod, Network, CPU, Service Chaos 병렬 실행
+#   - 각 Chaos는 독립적으로 실패 가능 (서로 영향 없음)
+#   - 모든 Chaos 후 자동 복구 수행
+# ─────────────────────────────────────────────
+
+- name: Execute Full Chaos Workflow (Parallel)
+  hosts: k3s_master
+  become: yes
+  strategy: free
+  vars:
+    target_namespace: "app"
+    chaos_duration: "{{ chaos_duration | default('10s') }}"
+    network_delay_ms: "{{ network_delay_ms | default(300) }}"
+    random_pod_kill_count: "{{ random_pod_kill_count | default(2) }}"
+    chaos_log_path: "/var/log/chaos_test.log"
+
+  tasks:
+    # ─────────────────────────────────────────────
+    # Step 1. 병렬 Chaos 테스트 실행
+    # ─────────────────────────────────────────────
+    - name: Launch Random Pod Kill Chaos
+      ansible.builtin.shell: >
+        ansible-playbook {{ playbook_dir }}/run_pod_kill.yml
+      async: 45
+      poll: 0
+      register: pod_job
+      ignore_errors: yes
+
+    - name: Launch Redis Network Chaos
+      ansible.builtin.shell: >
+        ansible-playbook {{ playbook_dir }}/run_network_chaos.yml
+      async: 45
+      poll: 0
+      register: net_job
+      ignore_errors: yes
+
+    - name: Launch CPU Stress Chaos
+      ansible.builtin.shell: >
+        ansible-playbook {{ playbook_dir }}/run_cpu_stress.yml
+      async: 45
+      poll: 0
+      register: cpu_job
+      ignore_errors: yes
+
+    - name: Launch Targeted Service Kill Chaos
+      ansible.builtin.shell: >
+        ansible-playbook {{ playbook_dir }}/run_service_kill.yml
+      async: 45
+      poll: 0
+      register: svc_job
+      ignore_errors: yes
+
+    # ─────────────────────────────────────────────
+    # Step 2. Chaos 상태 모니터링
+    # ─────────────────────────────────────────────
+    - name: Wait for all chaos jobs to complete
+      ansible.builtin.wait_for:
+        timeout: 60
+      delegate_to: localhost
+
+    - name: Log all chaos start events
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path }}"
+        create: yes
+        line: |
+          [{{ ansible_date_time.iso8601 }}] ChaosTest: All chaos events launched (Pod, Network, CPU, Service)
+      become: true
+
+    # ─────────────────────────────────────────────
+    # Step 3. 복구 단계 (항상 실행)
+    # ─────────────────────────────────────────────
+    - name: Execute Unified Recovery
+      ansible.builtin.shell: >
+        ansible-playbook {{ playbook_dir }}/restore_all.yml
+      register: restore_result
+      ignore_errors: no
+
+    - name: Log recovery result
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path }}"
+        create: yes
+        line: |
+          [{{ ansible_date_time.iso8601 }}] Recovery Completed
+          Result: {{ restore_result.stdout | default('No output') }}
+      become: true
+
+    # ─────────────────────────────────────────────
+    # Step 4. 최종 보고
+    # ─────────────────────────────────────────────
+    - name: Display final chaos summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ Chaos Engineering 병렬 시나리오 완료
+          - 네임스페이스: {{ target_namespace }}
+          - 주입된 Chaos: Pod Kill, Redis Network Delay, CPU Stress, Service Kill
+          - 모든 Chaos 테스트 후 자동 복구 완료
+

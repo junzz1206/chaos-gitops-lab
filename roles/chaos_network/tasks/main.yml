@@ -1,1 +1,76 @@
-# chaos_network tasks will be added here
+# ─────────────────────────────────────────────
+# roles/chaos_network/tasks/main.yml
+# 목적: redis-cart Pod에 네트워크 지연, 손실, 순서변경 주입
+# 표준 변수:
+#   target_namespace, network_delay_ms, chaos_duration
+# ─────────────────────────────────────────────
+
+- name: 🧩 Safety Check - Confirm namespace
+  ansible.builtin.assert:
+    that:
+      - target_namespace == "app"
+    fail_msg: "namespace가 'app'이 아닙니다."
+    success_msg: "namespace 확인 완료 ({{ target_namespace }})"
+
+# ─────────────────────────────────────────────
+# 1️⃣ Locate redis-cart pod
+# ─────────────────────────────────────────────
+- name: Locate redis-cart pod
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} -l app=redis-cart -o name | head -n 1
+  register: redis_pod
+  changed_when: false
+
+- name: Abort if redis-cart pod not found
+  ansible.builtin.fail:
+    msg: "redis-cart Pod를 찾을 수 없습니다."
+  when: redis_pod.stdout == ""
+
+# ─────────────────────────────────────────────
+# 2️⃣ Remove existing qdisc (safety cleanup)
+# ─────────────────────────────────────────────
+- name: Ensure no previous netem rule exists
+  ansible.builtin.shell: |
+    kubectl exec -n {{ target_namespace }} {{ redis_pod.stdout }} -- \
+      tc qdisc del dev eth0 root || true
+  changed_when: false
+  ignore_errors: yes
+
+# ─────────────────────────────────────────────
+# 3️⃣ Inject network chaos (delay + loss + reorder)
+# ─────────────────────────────────────────────
+- name: Inject combined network chaos
+  ansible.builtin.shell: |
+    kubectl exec -n {{ target_namespace }} {{ redis_pod.stdout }} -- \
+      tc qdisc add dev eth0 root netem \
+      delay {{ network_delay_ms }}ms loss 2% reorder 25%
+  ignore_errors: yes
+  register: netem_injected
+
+- name: Log applied network chaos
+  ansible.builtin.debug:
+    msg: |
+      redis-cart에 {{ network_delay_ms }}ms 지연, 2% 손실, 25% 패킷 순서 변경 주입 완료.
+      Pod: {{ redis_pod.stdout }}
+
+# ─────────────────────────────────────────────
+# 4️⃣ Hold chaos duration
+# ─────────────────────────────────────────────
+- name: Maintain chaos effect for defined duration
+  ansible.builtin.pause:
+    seconds: "{{ (chaos_duration | regex_replace('s$', '')) | int }}"
+  when: chaos_duration is defined
+
+# ─────────────────────────────────────────────
+# 5️⃣ Restore normal network state
+# ─────────────────────────────────────────────
+- name: Remove netem rule and restore normal traffic
+  ansible.builtin.shell: |
+    kubectl exec -n {{ target_namespace }} {{ redis_pod.stdout }} -- \
+      tc qdisc del dev eth0 root || true
+  ignore_errors: yes
+
+- name: ✅ Log recovery completion
+  ansible.builtin.debug:
+    msg: "redis-cart 네트워크 정상 상태로 복원 완료."
+

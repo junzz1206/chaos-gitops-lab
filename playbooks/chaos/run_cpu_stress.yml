@@ -1,0 +1,84 @@
+- name: CPU chaos test (checkoutservice) and automated health check
+  hosts: k3s_master
+  become: yes
+  vars:
+    # 기본값은 group_vars/all.yml 에 정의되어 있다고 가정합니다.
+    # chaos_duration 예: "10s" 또는 "15" (sleep이 허용하는 형식)
+    check_retries: 12
+    check_delay: 5
+    frontend_internal_host: "frontend"        # DNS name within namespace
+    frontend_internal_port: 8080
+
+  tasks:
+    - name: Safety check - ensure target_namespace exists
+      ansible.builtin.assert:
+        that:
+          - target_namespace is defined
+        fail_msg: "target_namespace 변수가 정의되어 있지 않습니다. -e 'target_namespace=app' 같이 지정해 주세요."
+
+    - name: Find a checkoutservice pod
+      ansible.builtin.shell: >
+        kubectl get pod -n {{ target_namespace }}
+          -l app=checkoutservice -o name --no-headers | head -n1
+      register: checkout_pod
+      changed_when: false
+
+    - name: Fail if no checkoutservice pod found
+      ansible.builtin.fail:
+        msg: "checkoutservice pod not found in namespace {{ target_namespace }}"
+      when: checkout_pod.stdout == ""
+
+    - name: Inject CPU: run background busy-loop in checkoutservice (safe timed)
+      ansible.builtin.shell: |
+        POD={{ checkout_pod.stdout }}
+        # run busy loop in container's shell in background, stop after {{ chaos_duration }}
+        kubectl exec -n {{ target_namespace }} $POD -- bash -c "yes > /dev/null & sleep {{ chaos_duration }} && pkill yes || true"
+      register: cpu_inject
+      async: 0
+      poll: 0
+      changed_when: true
+
+    - name: Pause while CPU chaos is running (allow some time for effect)
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Wait for chaos duration + small buffer
+      ansible.builtin.pause:
+        seconds: "{{ ( (chaos_duration | default('10s')) | regex_replace('s$','') | int ) + 3 }}"
+      when: "'s' in (chaos_duration | string) or (chaos_duration | string).isdigit()"
+
+    - name: Try internal HTTP check via ephemeral curl pod (returns HTTP code)
+      ansible.builtin.shell: >
+        kubectl run curl-test --rm -it -n {{ target_namespace }}
+          --image=curlimages/curl --restart=Never -- bash -c "curl -s -o /dev/null -w '%{http_code}' http://{{ frontend_internal_host }}:{{ frontend_internal_port }}"
+      register: http_code_result
+      failed_when: false
+      changed_when: false
+
+    - name: Debug HTTP result from internal curl
+      ansible.builtin.debug:
+        msg: "Internal curl returned: {{ http_code_result.stdout | default('') }}"
+
+    - name: If internal curl returned 200 -> success
+      ansible.builtin.debug:
+        msg: "✅ Frontend responded 200 after chaos."
+      when: http_code_result.stdout | default('') | trim == "200"
+
+    - name: If curl did not return 200, poll pod ready status as fallback
+      ansible.builtin.shell: >
+        kubectl get pods -n {{ target_namespace }} -l app=frontend -o jsonpath='{.items[0].status.containerStatuses[0].ready}'
+      register: frontend_ready
+      retries: "{{ check_retries }}"
+      delay: "{{ check_delay }}"
+      until: frontend_ready.stdout == "true"
+      failed_when: false
+      changed_when: false
+      when: http_code_result.stdout | default('') | trim != "200"
+
+    - name: Final result - success if either curl was 200 or frontend became ready
+      ansible.builtin.assert:
+        that:
+          - (http_code_result.stdout | default('') | trim == '200') or (frontend_ready.stdout | default('') | trim == 'true')
+        fail_msg: "Frontend did not respond with HTTP 200 and pod did not recover to Ready=true after chaos."
+        success_msg: "Frontend is healthy (HTTP 200 or pod Ready)."
+
