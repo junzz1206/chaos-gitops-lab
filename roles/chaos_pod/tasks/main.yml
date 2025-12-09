@@ -1,100 +1,102 @@
-# roles/chaos_pod/tasks/main.yml
-# 목적: 네임스페이스 내 Running 상태의 임의(무작위) Pod n개를 삭제하고 복구 상태를 확인하여 로그를 남김
-# 표준 변수:
-#   target_namespace: 실험 대상 네임스페이스 (기본: "app")
-#   random_pod_kill_count: 삭제할 무작위 Pod 개수 (기본: 1)
-#   target_pod_names: 특정 파드 이름 목록 (선택)
-#   chaos_duration: 주입 유지 시간 (예: "10s") -> 삭제 후 대기 시간으로 활용 (선택)
-#   chaos_log_path: 로그 파일 경로 (기본: /var/log/chaos_test.log)
-# 주의: 모든 kubectl 명령은 컨트롤러(Ansible 실행 호스트)에서 kubeconfig가 설정되어 있어야 함.
+# 목적:
+#   - 네임스페이스 내 특정 또는 무작위 Pod 삭제 (라벨 기반)
+#   - disable_autorecover=true 시 ReplicaSet 자동복구 차단
+#   - chaos_log_path_final에 결과 기록
+# ─────────────────────────────────────────────
 
+# Step 0️⃣: Safety Checks
 - name: "Safety Check - ensure target_namespace variable exists"
   ansible.builtin.assert:
     that:
       - target_namespace is defined
-    fail_msg: "target_namespace 변수가 정의되어 있지 않습니다. -e 'target_namespace=app' 같이 지정해 주세요."
-    success_msg: "target_namespace 변수 확인됨: {{ target_namespace }}"
+    fail_msg: "❌ target_namespace 변수가 정의되어 있지 않습니다. 예: -e 'target_namespace=app'"
+    success_msg: "✅ target_namespace 변수 확인됨: {{ target_namespace }}"
 
 - name: "Safety Check - ensure running in test namespace 'app' by default"
   ansible.builtin.assert:
     that:
       - (target_namespace | default('app')) == "app"
-    fail_msg: "안전장치: target_namespace가 'app'이 아닙니다. 테스트 전 확인 필요."
-    success_msg: "namespace 안전검사 통과 ({{ target_namespace }})"
+    fail_msg: "⚠️ 안전장치: target_namespace가 'app'이 아닙니다. Chaos 테스트 전 확인 필요."
+    success_msg: "✅ namespace 안전검사 통과 ({{ target_namespace }})"
 
-- name: "Set defaults for optional variables"
+# Step 1️⃣: Variable Initialization
+- name: "Set defaults for optional variables (safe defaults)"
   ansible.builtin.set_fact:
-    random_pod_kill_count: "{{ (random_pod_kill_count | default(1)) | int }}"
-    chaos_log_path: "/var/log/chaos_test.log"
+    chaos_log_path_final: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"
+    random_pod_kill_count_safe: "{{ (random_pod_kill_count | int) if (random_pod_kill_count is defined and (random_pod_kill_count | int) > 0) else 2 }}"
+    chaos_duration_safe: "{{ (chaos_duration | int) if (chaos_duration is defined and (chaos_duration | int) > 0) else 10 }}"
   changed_when: false
 
 - name: "Display run parameters"
   ansible.builtin.debug:
     msg: |
-      Running Random Pod Kill with parameters:
+      🧨 Chaos Pod Kill 시작
       - namespace: {{ target_namespace }}
-      - delete_count: {{ random_pod_kill_count }}
-      - chaos_duration: {{ chaos_duration | default('not set') }}
-      - log_path: {{ chaos_log_path }}
+      - delete_count: {{ random_pod_kill_count_safe }}
+      - chaos_duration: {{ chaos_duration_safe }}초
+      - log_path: {{ chaos_log_path_final }}
       - target_pod_names: {{ target_pod_names | join(', ') if (target_pod_names is defined and target_pod_names | length > 0) else '없음 (랜덤 대상)' }}
+      - disable_autorecover: {{ disable_autorecover | default(false) }}
 
-# ✅ 특정 파드 지정 기능 추가
-- name: "Use specific target_pod_names if defined"
-  when: target_pod_names is defined and target_pod_names | length > 0
-  ansible.builtin.set_fact:
-    pod_lines: "{{ target_pod_names | map('regex_replace', '^(.*)$', 'pod/\\1') | list }}"
+# Step 2️⃣: Disable auto-recover (optional)
+- name: "Find ReplicaSets in target namespace"
+  when: disable_autorecover | default(false)
+  ansible.builtin.shell: |
+    kubectl get rs -n {{ target_namespace }} -o jsonpath='{.items[*].metadata.name}'
+  register: rs_list_raw
   changed_when: false
 
-# ✅ 특정 파드가 지정되지 않은 경우 기존 로직 수행
-- name: "Get running pods in namespace"
-  when: pod_lines is not defined
-  ansible.builtin.shell:
-    cmd: "kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name --no-headers"
+- name: "Scale down all ReplicaSets to disable auto recovery"
+  when: disable_autorecover | default(false)
+  ansible.builtin.shell: |
+    for rs in {{ rs_list_raw.stdout }}; do
+      echo "Scaling down ReplicaSet: $rs"
+      kubectl scale rs "$rs" -n {{ target_namespace }} --replicas=0 || true
+    done
+  ignore_errors: yes
+  changed_when: true
+
+# Step 3️⃣: Resolve actual pods dynamically by label
+- name: "Resolve real pod names from labels"
+  when: target_pod_names is defined and target_pod_names | length > 0
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} -l app={{ item }} -o jsonpath='{.items[*].metadata.name}'
+  loop: "{{ target_pod_names }}"
+  register: resolved_pods
+  changed_when: false
+
+- name: "Collect resolved pod names"
+  when: target_pod_names is defined and target_pod_names | length > 0
+  ansible.builtin.set_fact:
+    selected_pods: "{{ resolved_pods.results | map(attribute='stdout') | map('split') | sum(start=[]) }}"
+  changed_when: false
+
+# Step 4️⃣: If no specific targets, select random running pods
+- name: "Get running pods in namespace (random mode)"
+  when: target_pod_names is not defined or target_pod_names | length == 0
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name --no-headers
   register: all_pods
   changed_when: false
 
-- name: "Abort if no running pods found"
-  when: pod_lines is not defined and (all_pods.stdout == "")
-  ansible.builtin.fail:
-    msg: "namespace '{{ target_namespace }}' 내 Running 상태의 Pod가 없습니다. 테스트 중지."
-
-- name: "Prepare list of pods for random selection"
-  when: pod_lines is not defined
+- name: "Select random pods for chaos"
+  when: target_pod_names is not defined or target_pod_names | length == 0
   ansible.builtin.set_fact:
-    pod_lines: "{{ all_pods.stdout_lines | map('trim') | reject('equalto','') | list }}"
+    selected_pods: "{{ (all_pods.stdout_lines | shuffle)[: (random_pod_kill_count_safe | int)] }}"
   changed_when: false
 
-- name: "Debug - show candidate pods"
+- name: "Debug - show selected pods"
   ansible.builtin.debug:
-    var: pod_lines
+    msg: "🗑️  삭제 대상 Pod: {{ selected_pods }}"
 
-- name: "Select random pods to delete"
-  ansible.builtin.set_fact:
-    selected_pods: >-
-      {{
-        (pod_lines if (target_pod_names is defined and target_pod_names | length > 0)
-         else (pod_lines | shuffle | slice(0, (random_pod_kill_count | int))))
-        | list
-      }}
-  changed_when: false
-
-- name: "Abort if no pods selected (after random selection)"
-  ansible.builtin.fail:
-    msg: "무작위 선택 결과 삭제할 Pod이 없습니다. candidate_count={{ pod_lines | length }} selected_count={{ selected_pods | length }}"
-  when: selected_pods | length == 0
-
-- name: "Debug - show selected pods to be deleted"
-  ansible.builtin.debug:
-    msg: "Selected pods for deletion: {{ selected_pods }}"
-
-- name: "Delete selected pods (forced, grace-period=0)"
-  ansible.builtin.shell:
-    cmd: |
-      set -eux
-      for p in {{ selected_pods | join(' ') }}; do
-        echo "Deleting pod: $p"
-        kubectl delete $p -n {{ target_namespace }} --grace-period=0 --force || echo "kubectl delete returned non-zero for $p"
-      done
+# Step 5️⃣: Delete selected pods (forced)
+- name: "Delete selected pods (grace-period=0, force)"
+  ansible.builtin.shell: |
+    set -eux
+    for p in {{ selected_pods | join(' ') }}; do
+      echo "Deleting pod: $p"
+      kubectl delete pod "$p" -n {{ target_namespace }} --grace-period=0 --force || echo "❗ kubectl delete failed for $p"
+    done
   register: kill_result
   ignore_errors: yes
   changed_when: true
@@ -103,47 +105,49 @@
   ansible.builtin.debug:
     var: kill_result.stdout_lines
 
-- name: "Pause briefly to allow scheduler to react"
+# Step 6️⃣: Wait for chaos_duration
+- name: "Pause to allow scheduler to react"
   ansible.builtin.pause:
-    seconds: "{{ (chaos_duration | default('10s')) | regex_replace('s$','') | int }}"
+    seconds: "{{ chaos_duration_safe }}"
 
-- name: "Check number of Running pods after deletion"
-  ansible.builtin.shell:
-    cmd: "kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running --no-headers | wc -l"
+# Step 7️⃣: Verify state
+- name: "Check Running pods after chaos"
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running --no-headers | wc -l
   register: recovery_count
   changed_when: false
 
-- name: "Debug - show running pod count after recovery"
+- name: "Show running pod count after chaos"
   ansible.builtin.debug:
-    msg: "Post-chaos Running pod count in {{ target_namespace }}: {{ recovery_count.stdout }}"
+    msg: "📊 Post-chaos Running pod count: {{ recovery_count.stdout }}"
 
-- name: "Collect non-running pods (optional) for investigation"
-  ansible.builtin.shell:
-    cmd: "kubectl get pods -n {{ target_namespace }} --field-selector=status.phase!=Running -o wide --no-headers || true"
-  register: non_running_pods
-  changed_when: false
+# Step 8️⃣: Re-enable auto recovery
+- name: "Re-enable ReplicaSet auto recovery (scale up)"
+  when: disable_autorecover | default(false)
+  ansible.builtin.shell: |
+    for rs in {{ rs_list_raw.stdout }}; do
+      echo "Restoring ReplicaSet: $rs"
+      kubectl scale rs "$rs" -n {{ target_namespace }} --replicas=1 || true
+    done
+  ignore_errors: yes
+  changed_when: true
 
-- name: "Debug - show non-running pods (if any)"
-  ansible.builtin.debug:
-    var: non_running_pods.stdout_lines
-
-- name: "Persist chaos execution result to log file"
+# Step 9️⃣: Persist log
+- name: "Persist chaos result to log"
   ansible.builtin.lineinfile:
-    path: "{{ chaos_log_path }}"
+    path: "{{ chaos_log_path_final }}"
     create: true
     line: |
-      [{{ ansible_date_time.iso8601 }}] RandomPodChaos: namespace={{ target_namespace }} deleted={{ selected_pods | join(',') }} deleted_count={{ selected_pods | length }} running_after={{ recovery_count.stdout }} non_running={{ non_running_pods.stdout_lines | default('None') | join(' ; ') }}
+      [{{ ansible_date_time.iso8601 }}] PodChaos: ns={{ target_namespace }} deleted={{ selected_pods | join(',') }} count={{ selected_pods | length }} running_after={{ recovery_count.stdout }}
   become: true
   when: recovery_count is defined
 
+# Step 🔟: Summary
 - name: "Final debug summary"
   ansible.builtin.debug:
     msg: |
-      Random Pod Kill completed.
+      ✅ Chaos Pod Kill 완료.
       - namespace: {{ target_namespace }}
-      - deleted: {{ selected_pods | join(',') }}
-      - deleted_count: {{ selected_pods | length }}
+      - deleted_pods: {{ selected_pods | join(', ') }}
+      - total_deleted: {{ selected_pods | length }}
       - running_after: {{ recovery_count.stdout }}
-      - non_running_details: {{ non_running_pods.stdout_lines | default(['None']) }}
-
-~
