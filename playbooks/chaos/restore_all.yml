@@ -5,7 +5,7 @@
 #   target_namespace, recovery_targets, chaos_log_path, recovery_wait
 # ─────────────────────────────────────────────
 
-- name: 🛠️ Perform Unified Service Recovery
+- name: 🛠️  Perform Unified Service Recovery
   hosts: k3s_master
   become: yes
   vars:
@@ -31,12 +31,12 @@
     - name: 🧾 Announce recovery start
       ansible.builtin.debug:
         msg: |
-          🛠️ 전체 복구 시작
+          🛠️  전체 복구 시작
           - 대상 네임스페이스: {{ target_namespace }}
           - 대상 서비스: {{ recovery_targets | join(', ') }}
           - 안정화 대기 시간: {{ recovery_wait }}초
 
-    # Step 3️⃣: Iterate over all recovery targets
+    # Step 3️⃣: Restart deployments
     - name: 🔁 Restart all target deployments
       ansible.builtin.shell: |
         for svc in {{ recovery_targets | join(' ') }}; do
@@ -46,6 +46,10 @@
       register: restart_output
       ignore_errors: yes
       changed_when: true
+
+    - name: 🧾 Show restart output
+      ansible.builtin.debug:
+        var: restart_output.stdout_lines
 
     # Step 4️⃣: Wait for stabilization
     - name: ⏳ Wait for pods to stabilize
@@ -75,21 +79,59 @@
       changed_when: false
       ignore_errors: yes
 
-    # Step 7️⃣: Log Recovery Results
+    - name: 🧾 Show non-running pods (if any)
+      ansible.builtin.debug:
+        var: non_running_pods.stdout_lines
+
+    # Step 6️⃣.5️⃣: Force restart non-running pods (optional pod-level recovery)
+    - name: 🧹 Force delete non-running pods for recovery
+      when: non_running_pods.stdout is defined and (non_running_pods.stdout | trim | length > 0)
+      ansible.builtin.shell: |
+        echo "⚙️ 비정상 Pod 강제 삭제 중..."
+        kubectl get pods -n {{ target_namespace }} --field-selector=status.phase!=Running -o name | \
+        xargs -r -n1 kubectl delete -n {{ target_namespace }} --grace-period=0 --force || true
+      register: forced_recovery
+      ignore_errors: yes
+      changed_when: true
+
+    - name: 🧾 Print forced pod recovery result
+      when: forced_recovery is defined
+      ansible.builtin.debug:
+        msg: |
+          🧹 비정상 Pod 삭제 결과:
+          {{ forced_recovery.stdout | default('삭제된 Pod 없음') }}
+
+    # Step 7️⃣: Wait again for stabilization after forced recovery
+    - name: ⏳ Wait again after pod-level recovery
+      when: forced_recovery is defined
+      ansible.builtin.pause:
+        seconds: "{{ recovery_wait }}"
+
+    # Step 8️⃣: Verify final state
+    - name: 🔍 Check final running pods
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ target_namespace }} --no-headers | grep -v Running || true
+      register: final_nonrunning
+      changed_when: false
+      ignore_errors: yes
+
+    # Step 9️⃣: Log Recovery Results
     - name: 🪶 Write recovery summary to log
       ansible.builtin.lineinfile:
         path: "{{ chaos_log_path }}"
         create: yes
         line: |
-          [{{ ansible_date_time.iso8601 }}] Recovery: ns={{ target_namespace }} targets={{ recovery_targets | join(',') }} result="{{ deploy_status.stdout | replace('\n','; ') }}" issues="{{ non_running_pods.stdout | replace('\n','; ') }}"
+          [{{ ansible_date_time.iso8601 }}] Recovery: ns={{ target_namespace }} targets={{ recovery_targets | join(',') }} result="{{ deploy_status.stdout | replace('\n','; ') }}" issues="{{ non_running_pods.stdout | replace('\n','; ') }}" final_issues="{{ final_nonrunning.stdout | replace('\n','; ') }}"
       become: true
 
-    # Step 8️⃣: Final summary output
+    # Step 🔟: Final summary output
     - name: ✅ Print final recovery summary
       ansible.builtin.debug:
         msg: |
           ✅ 전체 복구 완료
           - 복구 대상: {{ recovery_targets | join(', ') }}
-          - 비정상 Pod:
+          - 1차 비정상 Pod:
           {{ non_running_pods.stdout | default('없음 (모두 Running)') }}
+          - 2차 확인(강제복구 후 남은 Pod):
+          {{ final_nonrunning.stdout | default('없음 (모두 정상)') }}
 
