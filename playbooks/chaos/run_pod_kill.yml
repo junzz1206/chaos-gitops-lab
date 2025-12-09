@@ -1,11 +1,13 @@
+
 # ─────────────────────────────────────────────
 # playbooks/chaos/run_pod_kill.yml
 # 목적:
 #   - app 네임스페이스 내 임의의 Pod 여러 개를 무작위로 삭제
+#   - 특정 파드(target_pod_names) 지정 시 해당 파드만 삭제
 #   - Chaos Monkey 스타일 실험 수행
 #   - 삭제 결과를 로그로 남기고 상태 확인 수행
 # 표준 변수:
-#   target_namespace, random_pod_kill_count, chaos_log_path, recovery_wait
+#   target_namespace, random_pod_kill_count, chaos_log_path, recovery_wait, target_pod_names
 # ─────────────────────────────────────────────
 
 - name: 🧨 Run Random Pod Kill Chaos
@@ -16,6 +18,10 @@
     random_pod_kill_count: "{{ random_pod_kill_count | default(2) }}"
     recovery_wait: 10
     chaos_log_path: "/var/log/chaos_test.log"
+
+    # ✅ 추가된 부분: 특정 파드 지정 (선택 사항)
+    # 예시: target_pod_names: ["cartservice-65d4bd4697-fh55b", "paymentservice-6fdf44b6b4-xyz"]
+    target_pod_names: "{{ target_pod_names | default([]) }}"
 
   tasks:
     # Step 1️⃣: Safety Check
@@ -33,11 +39,14 @@
           🧨 Random Pod Kill Chaos 시작
           - 네임스페이스: {{ target_namespace }}
           - 무작위 삭제 개수: {{ random_pod_kill_count }}
+          - 지정된 타겟 파드: {{ target_pod_names | join(', ') if target_pod_names | length > 0 else '없음 (랜덤 선택)' }}
 
     # Step 3️⃣: Execute Pod Kill Role
     - name: 💀 Execute chaos_pod role
       ansible.builtin.include_role:
         name: chaos_pod
+      vars:
+        target_pod_names: "{{ target_pod_names }}"     # ✅ 역할로 변수 전달
       ignore_errors: yes
       register: pod_kill_result
 
@@ -67,6 +76,6 @@
         path: "{{ chaos_log_path }}"
         create: yes
         line: |
-          [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ random_pod_kill_count }} result="{{ pod_state.stdout | replace('\n','; ') }}"
-      become: true
+          [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ random_pod_kill_count }} targets={{ target_pod_names | join(', ') if target_pod_names | length > 0 else '랜덤' }} result="{{ pod_state.stdout | replace('\n','; ') }}"
 
+  
