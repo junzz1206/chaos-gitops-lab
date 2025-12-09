@@ -16,7 +16,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: productcatalogservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: productcatalogservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab
@@ -79,7 +79,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: productcatalogservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: productcatalogservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab
@@ -99,7 +99,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: productcatalogservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: productcatalogservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab

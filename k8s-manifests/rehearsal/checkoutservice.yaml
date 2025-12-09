@@ -16,7 +16,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: checkoutservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: checkoutservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab
@@ -88,7 +88,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: checkoutservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: checkoutservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab
@@ -108,7 +108,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: checkoutservice
-  namespace: app
+  namespace: rehearsal-space
   labels:
     app: checkoutservice
     app.kubernetes.io/part-of: online-boutique-chaos-lab
