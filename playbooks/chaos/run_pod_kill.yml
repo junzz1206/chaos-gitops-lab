@@ -1,30 +1,27 @@
-
 # ─────────────────────────────────────────────
 # playbooks/chaos/run_pod_kill.yml
 # 목적:
 #   - app 네임스페이스 내 임의의 Pod 여러 개를 무작위로 삭제
-#   - 특정 파드(target_pod_names) 지정 시 해당 파드만 삭제
+#   - 특정 파드(target_pod_names_local) 지정 시 해당 파드만 삭제
 #   - Chaos Monkey 스타일 실험 수행
 #   - 삭제 결과를 로그로 남기고 상태 확인 수행
 # 표준 변수:
-#   target_namespace, random_pod_kill_count, chaos_log_path, recovery_wait, target_pod_names
+#   target_namespace, kill_count_local, chaos_log_path_local, recovery_wait, target_pod_names_local
 # ─────────────────────────────────────────────
 
 - name: 🧨 Run Random Pod Kill Chaos
   hosts: k3s_master
   become: yes
-  vars:
-    target_namespace: "app"
-    random_pod_kill_count: "{{ random_pod_kill_count | default(2) }}"
-    recovery_wait: 10
-    chaos_log_path: "/var/log/chaos_test.log"
 
-    # ✅ 추가된 부분: 특정 파드 지정 (선택 사항)
-    # 예시: target_pod_names: ["cartservice-65d4bd4697-fh55b", "paymentservice-6fdf44b6b4-xyz"]
-    target_pod_names: "{{ target_pod_names | default([]) }}"
+  vars:
+    target_namespace: "app"                       # Chaos 대상 네임스페이스
+    kill_count_local: 2                           # 삭제할 파드 개수
+    recovery_wait: 10                             # 복구 대기 시간(초)
+    chaos_log_path_local: "/var/log/chaos_test.log"
+    target_pod_names_local: []                    # 특정 파드 지정 없으면 랜덤 선택
 
   tasks:
-    # Step 1️⃣: Safety Check
+    # Step 1️⃣: 안전장치 - 네임스페이스 검증
     - name: 🧩 Validate namespace
       ansible.builtin.assert:
         that:
@@ -32,50 +29,56 @@
         fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 수행됩니다."
         success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
 
-    # Step 2️⃣: Display test parameters
-    - name: 🧾 Print chaos configuration
+    # Step 2️⃣: Chaos 설정 출력
+    - name: 🔍 Print chaos configuration
       ansible.builtin.debug:
         msg: |
           🧨 Random Pod Kill Chaos 시작
           - 네임스페이스: {{ target_namespace }}
-          - 무작위 삭제 개수: {{ random_pod_kill_count }}
-          - 지정된 타겟 파드: {{ target_pod_names | join(', ') if target_pod_names | length > 0 else '없음 (랜덤 선택)' }}
+          - 삭제 개수: {{ kill_count_local }}
+          - 지정된 타겟 파드: {{ target_pod_names_local | join(', ') if target_pod_names_local | length > 0 else '없음 (랜덤 선택)' }}
+          - 로그 경로: {{ chaos_log_path_local }}
+          - 복구 대기 시간: {{ recovery_wait }}초
 
-    # Step 3️⃣: Execute Pod Kill Role
-    - name: 💀 Execute chaos_pod role
+    # Step 3️⃣: chaos_pod 롤 실행
+    - name: ⚙️ Execute chaos_pod role
       ansible.builtin.include_role:
         name: chaos_pod
       vars:
-        target_pod_names: "{{ target_pod_names }}"     # ✅ 역할로 변수 전달
+        target_namespace: "{{ target_namespace }}"
+        kill_count_from_playbook: "{{ kill_count_local }}"
+        chaos_log_path: "{{ chaos_log_path_local }}"
+        target_pod_names: "{{ target_pod_names_local }}"
       ignore_errors: yes
       register: pod_kill_result
 
-    # Step 4️⃣: Wait for stabilization
+    # Step 4️⃣: 복구 대기
     - name: ⏳ Wait before verifying pod recovery
       ansible.builtin.pause:
         seconds: "{{ recovery_wait }}"
 
-    # Step 5️⃣: Verify pod status
-    - name: 🔍 Verify current pod state
+    # Step 5️⃣: 현재 파드 상태 확인
+    - name: 🔎 Verify current pod state
       ansible.builtin.shell: |
         kubectl get pods -n {{ target_namespace }} -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
       register: pod_state
       changed_when: false
       ignore_errors: yes
 
-    # Step 6️⃣: Display results
+    # Step 6️⃣: 결과 출력
     - name: 🧾 Print pod state summary
       ansible.builtin.debug:
         msg: |
           ✅ Random Pod Kill Chaos 결과
-          {{ pod_state.stdout | default('Pod 상태 정보를 가져올 수 없습니다.') }}
+          {{ pod_state.stdout | default('⚠️ Pod 상태 정보를 가져올 수 없습니다.') }}
 
-    # Step 7️⃣: Log chaos result
-    - name: 🪶 Write chaos summary to log file
+    # Step 7️⃣: 로그 파일에 결과 기록
+    - name: 🪵 Write chaos summary to log file
       ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
+        path: "{{ chaos_log_path_local }}"
         create: yes
         line: |
-          [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ random_pod_kill_count }} targets={{ target_pod_names | join(', ') if target_pod_names | length > 0 else '랜덤' }} result="{{ pod_state.stdout | replace('\n','; ') }}"
+          [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ kill_count_local }} targets={{ target_pod_names_local | join(', ') if target_pod_names_local | length > 0 else '랜덤' }} result="{{ pod_state.stdout | replace('\n','; ') }}"
+      become: true
+      when: pod_state is defined
 
-  
