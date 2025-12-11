@@ -1,80 +1,144 @@
 # ─────────────────────────────────────────────
-# playbooks/chaos/run_service_kill.yml
-# 목적: 주요 서비스(cart, payment, redis-cart) Pod 강제 종료 (Service Chaos)
-# 설명:
-#   - cartservice, paymentservice, redis-cart 등 주요 백엔드 서비스의 Pod를 종료
-#   - Chaos Monkey 스타일로 순차 또는 병렬 실행 가능
-# 표준 변수:
-#   target_namespace, chaos_log_path, recovery_wait
+# 파일명: playbooks/chaos/run_service_kill.yml
+# 목적:
+#   - 여러 서비스(cart, payment, redis-cart 등)에 병렬로 Chaos Kill 주입
+#   - 환경변수(TARGET_SERVICES) 또는 vars.yml 기반 지정 가능
+#   - Deployment, ReplicaSet, StatefulSet 자동복구 완전 차단
+#   - wrapper나 include_role 없이 그대로 병렬 async 실행
+#   - ArgoCD / GitLab CI/CD 연동 지원
 # ─────────────────────────────────────────────
 
-- name: 💥 Execute Targeted Service Kill Chaos
+- name: Execute Targeted Service Kill Chaos
   hosts: k3s_master
   become: yes
+
   vars:
     target_namespace: "app"
     chaos_log_path: "/var/log/chaos_test.log"
-    recovery_wait: 10
-    service_targets:
-      - cartservice
-      - paymentservice
-      - redis-cart
+    recovery_wait: 120
+    service_targets: []   # 기본값 (없으면 ENV → fallback)
 
   tasks:
-    # Step 1️⃣: Safety Check
-    - name: 🧩 Validate namespace
+    # Step 1️⃣: ENV 기반 서비스 로드
+    - name: Resolve target services from environment variable (TARGET_SERVICES)
+      vars:
+        env_services: "{{ lookup('env', 'TARGET_SERVICES') | default('', true) }}"
+      ansible.builtin.set_fact:
+        effective_services: >-
+          {{
+            (env_services.split(',') | map('trim') | list)
+            if env_services | length > 0
+            else (service_targets | default([]))
+          }}
+      changed_when: false
+
+    - name: Show resolved services
+      ansible.builtin.debug:
+        msg: |
+          🎯 Chaos 대상 서비스 결정
+          - ENV(TARGET_SERVICES): {{ lookup('env', 'TARGET_SERVICES') | default('N/A') }}
+          - Local vars(service_targets): {{ service_targets | default([]) }}
+          - Effective services: {{ effective_services | default([]) }}
+
+    # Step 2️⃣: Safety Check
+    - name: Validate target namespace
       ansible.builtin.assert:
         that:
           - target_namespace == "app"
-        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 수행됩니다."
+        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 허용됩니다."
         success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
 
-    # Step 2️⃣: Log start
-    - name: 🧾 Announce service kill chaos
+    # Step 3️⃣: 시작 로그
+    - name: Announce service kill chaos
       ansible.builtin.debug:
         msg: |
           💥 서비스 Kill Chaos 시작
           - 대상 네임스페이스: {{ target_namespace }}
-          - 대상 서비스: {{ service_targets | join(', ') }}
+          - 대상 서비스: {{ effective_services | join(', ') if effective_services | length > 0 else '랜덤 모드' }}
+          - 자동복구: 완전 차단
 
-    # Step 3️⃣: Iterate service kills
-    - name: 🔁 Execute chaos_kill role for each target
-      ansible.builtin.include_role:
-        name: chaos_kill
-      vars:
-        target_app_label: "{{ item }}"
-      loop: "{{ service_targets }}"
+    # Step 4️⃣: 자동복구 차단 + Pod Kill (병렬 async)
+    - name: Kill and disable autorecover for each service (parallel)
+      when: effective_services | length > 0
+      ansible.builtin.shell: |
+        echo "[CHAOS] Killing and disabling autorecover for {{ item }}..."
+
+        # 1. Deployment scale down
+        kubectl get deploy -n {{ target_namespace }} -l app={{ item }} -o name | \
+          xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+
+        # 2. ReplicaSet scale down
+        kubectl get rs -n {{ target_namespace }} -l app={{ item }} -o name | \
+          xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+
+        # 3. StatefulSet scale down
+        kubectl get sts -n {{ target_namespace }} -l app={{ item }} -o name | \
+          xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+
+        # 4. Pod 강제 삭제
+        echo "[KILL] Deleting pods of {{ item }}"
+        kubectl get pods -n {{ target_namespace }} -l app={{ item }} -o name | \
+          xargs -r -I{} kubectl delete {} -n {{ target_namespace }} --grace-period=0 --force
+
+        echo "[OK] {{ item }} chaos complete."
+      async: 90
+      poll: 0
+      loop: "{{ effective_services }}"
+      register: async_jobs
       ignore_errors: yes
-      register: service_kill_results
 
-    # Step 4️⃣: Pause for stabilization
-    - name: ⏳ Wait before verifying service recovery
+    # Step 5️⃣: 병렬 작업 모니터링
+    - name: Monitor async chaos job statuses
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: chaos_status
+      until: chaos_status.finished
+      retries: 20
+      delay: 3
+      loop: "{{ async_jobs.results }}"
+      ignore_errors: yes
+
+    # Step 6️⃣: 안정화 대기
+    - name: Wait before verifying service recovery
       ansible.builtin.pause:
         seconds: "{{ recovery_wait }}"
 
-    # Step 5️⃣: Verify service status
-    - name: 🔍 Check current service pod states
+    # Step 7️⃣: 서비스 상태 확인
+    - name: Check current service pod states
       ansible.builtin.shell: |
+        echo "[STATUS] Checking pods for {{ effective_services | join(', ') }}"
         kubectl get pods -n {{ target_namespace }} \
-          -l "app in ({{ service_targets | join(',') }})" \
+          -l "app in ({{ effective_services | join(',') }})" \
           -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
       register: pod_status
       changed_when: false
       ignore_errors: yes
 
-    # Step 6️⃣: Display results
-    - name: 🧾 Print service kill results
+    # Step 8️⃣: 결과 출력
+    - name: Print service kill results
       ansible.builtin.debug:
         msg: |
           📋 서비스 Kill Chaos 결과
           {{ pod_status.stdout | default('정보 없음') }}
 
-    # Step 7️⃣: Log results to chaos log
-    - name: 🪶 Write service chaos summary to log
+    # Step 9️⃣: Chaos 로그 기록
+    - name: Write chaos summary to log
       ansible.builtin.lineinfile:
         path: "{{ chaos_log_path }}"
         create: yes
         line: |
-          [{{ ansible_date_time.iso8601 }}] ServiceKill: ns={{ target_namespace }} targets={{ service_targets | join(',') }} result="{{ pod_status.stdout | replace('\n','; ') }}"
+          [{{ ansible_date_time.iso8601 }}] ServiceKill ns={{ target_namespace }} \
+          targets={{ effective_services | join(',') }} \
+          result="{{ pod_status.stdout | replace('\n','; ') }}"
       become: true
+
+    # Step 🔟: 최종 요약
+    - name: Final summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ Chaos Service Kill 완료
+          - 네임스페이스: {{ target_namespace }}
+          - 대상 서비스: {{ effective_services | join(', ') if effective_services | length > 0 else '랜덤' }}
+          - 복구 대기: {{ recovery_wait }}초
+          - 로그 파일: {{ chaos_log_path }}
 

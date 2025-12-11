@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────
+# playbooks/run_full_pipeline.yml
+# 전체 Chaos Lab 파이프라인 실행
+#   1. Namespace 생성
+#   2. App 배포
+#   3. Chaos Test 실행
+#   4. 전체 복구
+# ─────────────────────────────────────────────
+
+- name: 🚀 Deploy Namespace
+  hosts: k3s_master
+  become: yes
+  tasks:
+    - name: Apply namespace manifest
+      ansible.builtin.command:
+        cmd: kubectl apply -f namespace/app.yaml
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+- name: 🧩 Deploy Application Manifests
+  hosts: k3s_master
+  become: yes
+  tasks:
+    - name: Apply all app manifests
+      ansible.builtin.command:
+        cmd: kubectl apply -f app/
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+- name: 💣 Run Chaos Experiments
+  import_playbook: chaos/run_chaos_test.yml
+
+- name: 🛠 Restore All Services
+  import_playbook: chaos/restore_all.yml
+

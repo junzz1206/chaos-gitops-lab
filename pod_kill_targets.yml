@@ -1,0 +1,7 @@
+target_pod_names_local:
+  - currencyservice
+  - productcatalogservice
+
+disable_autorecover_local: true
+recovery_wait: 60
+

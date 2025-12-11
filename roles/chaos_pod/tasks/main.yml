@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # 목적:
 #   - 네임스페이스 내 특정 또는 무작위 Pod 삭제 (라벨 기반)
 #   - disable_autorecover=true 시 ReplicaSet 자동복구 차단
@@ -151,3 +152,40 @@
       - deleted_pods: {{ selected_pods | join(', ') }}
       - total_deleted: {{ selected_pods | length }}
       - running_after: {{ recovery_count.stdout }}
+=======
+# Step 1.5️⃣: Dynamic Target Resolution (CI/CD 환경변수 or 파일)
+- name: "Resolve target pod names from environment variable or file"
+  vars:
+    env_target_pods: "{{ lookup('env', 'TARGET_PODS') | default('', true) }}"
+  block:
+    - name: "Load pod targets from CI/CD environment variable"
+      when: env_target_pods | length > 0
+      ansible.builtin.set_fact:
+        target_pod_names: "{{ env_target_pods.split(',') }}"
+      changed_when: false
+
+    - name: "Load pod targets from pod_kill_targets.yml (fallback)"
+      when:
+        - (target_pod_names is not defined or target_pod_names | length == 0)
+        - lookup('file', '{{ playbook_dir }}/../../pod_kill_targets.yml', errors='ignore') is not none
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
+        name: pod_targets_fallback
+
+    - name: "Apply fallback target list from pod_kill_targets.yml"
+      when:
+        - target_pod_names is not defined or target_pod_names | length == 0
+        - pod_targets_fallback is defined and pod_targets_fallback.pod_targets is defined
+      ansible.builtin.set_fact:
+        target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
+      changed_when: false
+
+    - name: "Show resolved pod targets (env or file)"
+      ansible.builtin.debug:
+        msg: |
+          🎯 Target pods resolved:
+          - From ENV: {{ env_target_pods if env_target_pods | length > 0 else 'N/A' }}
+          - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
+          - Effective: {{ target_pod_names | default([]) }}
+
+>>>>>>> Stashed changes

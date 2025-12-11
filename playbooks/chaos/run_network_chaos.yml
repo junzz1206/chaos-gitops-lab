@@ -1,93 +1,155 @@
 # ─────────────────────────────────────────────
 # playbooks/chaos/run_network_chaos.yml
 # 목적:
-#   - redis-cart Pod에 네트워크 지연, 손실, 순서변경 등 주입
-#   - Chaos 실험 후 상태 검증 및 로그 기록
+#   - internal: 지정된 서비스 Pod 내부에 네트워크 지연/손실/손상 주입
+#   - external: 노드 NIC(ens160 등)에 직접 네트워크 장애 주입
+#   - Chaos 실험 후 상태 검증 및 복구/로그 수행
 # 표준 변수:
-#   target_namespace, network_delay_ms, chaos_log_path, recovery_wait
+#   target_namespace, net_mode, network_delay_ms,
+#   packet_loss_percent, packet_corrupt_percent,
+#   recovery_wait, chaos_log_path, target_services
 # ─────────────────────────────────────────────
 
-- name: 🌐 Run Redis Network Chaos
+- name: 🌐 Run Network Chaos
   hosts: k3s_master
   become: yes
   vars:
     target_namespace: "app"
-    network_delay_ms: "{{ network_delay_ms | default(300) }}"
-    packet_loss_percent: "{{ packet_loss_percent | default(2) }}"
-    packet_corrupt_percent: "{{ packet_corrupt_percent | default(1) }}"
-    recovery_wait: 10
+    net_mode: "{{ net_mode | default('internal') }}"
+    network_delay_ms: "{{ network_delay_ms | default(3000) }}"
+    packet_loss_percent: "{{ packet_loss_percent | default(5) }}"
+    packet_corrupt_percent: "{{ packet_corrupt_percent | default(0) }}"
+    recovery_wait: "{{ recovery_wait | default(60) }}"
     chaos_log_path: "/var/log/chaos_test.log"
+    target_services: "{{ (target_services | default('redis-cart')).split(',') | map('trim') | list }}"
 
   tasks:
-    # Step 1️⃣: Safety Check
+    # ─────────────────────────────────────────────
+    # 1️⃣ Safety Check
+    # ─────────────────────────────────────────────
     - name: 🧩 Validate target namespace
       ansible.builtin.assert:
         that:
           - target_namespace == "app"
-        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 수행해야 합니다."
+        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 내에서만 수행해야 합니다."
         success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
 
-    # Step 2️⃣: Locate redis-cart Pod
-    - name: 🔍 Locate redis-cart pod
-      ansible.builtin.shell: |
-        kubectl get pods -n {{ target_namespace }} -l app=redis-cart -o name | head -n 1
-      register: redis_pod
-      changed_when: false
+    # ─────────────────────────────────────────────
+    # 2️⃣ Internal Mode - 다중 서비스 netem 주입
+    # ─────────────────────────────────────────────
+    - name: 💣 Inject network chaos inside target pods (internal)
+      when: net_mode == "internal"
+      block:
+        - name: 🚫 Fail if no target services specified
+          when: target_services | length == 0
+          ansible.builtin.fail:
+            msg: "internal 모드에서는 최소 1개 이상의 target_services가 필요합니다."
 
-    - name: ❌ Abort if redis-cart pod not found
-      ansible.builtin.fail:
-        msg: "redis-cart Pod를 찾을 수 없습니다."
-      when: redis_pod.stdout == ""
+        - name: 🔁 Apply netem to each service pod
+          ansible.builtin.shell: |
+            set -eux
+            for svc in {{ target_services | join(' ') }}; do
+              echo "[INFO] 서비스: $svc → Pod 조회 중..."
+              POD_NAME=$(kubectl get pod -n {{ target_namespace }} -l app=$svc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              if [ -z "$POD_NAME" ]; then
+                echo "[SKIP] $svc 서비스에 실행 중인 Pod이 없습니다."
+                continue
+              fi
 
-    # Step 3️⃣: Inject Network Chaos
-    - name: 💣 Inject combined network chaos (delay + loss + corrupt)
-      ansible.builtin.shell: |
-        kubectl exec -n {{ target_namespace }} {{ redis_pod.stdout }} -- \
-          tc qdisc add dev eth0 root netem delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}%
-      register: netem_result
-      ignore_errors: yes
-      changed_when: true
+              echo "[ACTION] $svc ($POD_NAME)에 네트워크 Chaos 주입 중..."
+              kubectl exec -n {{ target_namespace }} $POD_NAME -- tc qdisc del dev eth0 root || true
+              kubectl exec -n {{ target_namespace }} $POD_NAME -- \
+                tc qdisc add dev eth0 root netem delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}%
 
-    # Step 4️⃣: Log Injection
-    - name: 🧾 Log network chaos injection
-      ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
-        create: yes
-        line: |
-          [{{ ansible_date_time.iso8601 }}] NetworkChaos: redis-cart delay={{ network_delay_ms }}ms loss={{ packet_loss_percent }}% corrupt={{ packet_corrupt_percent }}%
-      become: true
+              echo "[OK] $svc ($POD_NAME)에 {{ network_delay_ms }}ms 지연, {{ packet_loss_percent }}% 손실, {{ packet_corrupt_percent }}% 손상 적용 완료."
+            done
+          register: internal_netem_result
+          ignore_errors: yes
+          changed_when: true
 
-    # Step 5️⃣: Wait for effect
-    - name: ⏳ Wait for network chaos effect to take hold
-      ansible.builtin.pause:
-        seconds: "{{ recovery_wait }}"
+        - name: 🧾 Log internal chaos injection
+          ansible.builtin.lineinfile:
+            path: "{{ chaos_log_path }}"
+            create: yes
+            line: |
+              [{{ ansible_date_time.iso8601 }}] NetworkChaos(INTERNAL): targets={{ target_services | join(', ') }} delay={{ network_delay_ms }}ms loss={{ packet_loss_percent }}% corrupt={{ packet_corrupt_percent }}%
+          become: true
 
-    # Step 6️⃣: Verify network condition (optional ping test)
-    - name: 📡 Test response time from cartservice to redis-cart
-      ansible.builtin.shell: |
-        CART_POD=$(kubectl get pods -n {{ target_namespace }} -l app=cartservice -o jsonpath='{.items[0].metadata.name}')
-        kubectl exec -n {{ target_namespace }} $CART_POD -- ping -c 3 redis-cart | tail -n 5
-      register: ping_result
-      ignore_errors: yes
+        - name: ⏳ Wait for network chaos effect
+          ansible.builtin.pause:
+            seconds: "{{ recovery_wait }}"
 
-    - name: 🧾 Display ping result summary
-      ansible.builtin.debug:
-        msg: |
-          🧠 네트워크 Chaos 상태 점검 결과:
-          {{ ping_result.stdout | default('Ping 결과 없음') }}
+        - name: 🧹 Restore normal network (internal)
+          ansible.builtin.shell: |
+            set -eux
+            for svc in {{ target_services | join(' ') }}; do
+              POD_NAME=$(kubectl get pod -n {{ target_namespace }} -l app=$svc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              [ -z "$POD_NAME" ] && continue
+              echo "[RESTORE] $svc ($POD_NAME) 복원 중..."
+              kubectl exec -n {{ target_namespace }} $POD_NAME -- tc qdisc del dev eth0 root || true
+            done
+          ignore_errors: yes
 
-    # Step 7️⃣: Optional clear (cleanup for next test)
-    - name: 🧹 Remove netem chaos (restore normal state)
-      ansible.builtin.shell: |
-        kubectl exec -n {{ target_namespace }} {{ redis_pod.stdout }} -- tc qdisc del dev eth0 root || true
-      ignore_errors: yes
+        - name: 🪶 Log internal recovery
+          ansible.builtin.lineinfile:
+            path: "{{ chaos_log_path }}"
+            create: yes
+            line: |
+              [{{ ansible_date_time.iso8601 }}] NetworkChaos(INTERNAL): targets={{ target_services | join(', ') }} restored
+          become: true
 
-    # Step 8️⃣: Log cleanup
-    - name: 🪶 Write cleanup log
-      ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
-        create: yes
-        line: |
-          [{{ ansible_date_time.iso8601 }}] NetworkChaos: redis-cart restored to normal state
-      become: true
+        - name: ✅ Internal recovery complete
+          ansible.builtin.debug:
+            msg: "[Internal Mode] {{ target_services | join(', ') }} 네트워크 정상 복원 완료."
+
+    # ─────────────────────────────────────────────
+    # 3️⃣ External Mode - 호스트 NIC 수준 netem 주입
+    # ─────────────────────────────────────────────
+    - name: 🌍 Inject host-level network chaos (external)
+      when: net_mode == "external"
+      block:
+        - name: 🌐 Announce external chaos start
+          ansible.builtin.debug:
+            msg: |
+              [External Mode] 노드 전체 네트워크 장애 주입 시작:
+              - delay={{ network_delay_ms }}ms
+              - loss={{ packet_loss_percent }}%
+              - corrupt={{ packet_corrupt_percent }}%
+              - duration={{ recovery_wait }}s
+
+        - name: ⚙️ Apply tc qdisc on host NIC (ens160)
+          ansible.builtin.shell: |
+            tc qdisc del dev ens160 root || true
+            tc qdisc add dev ens160 root netem delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}%
+          ignore_errors: yes
+          changed_when: true
+
+        - name: 🧾 Log external chaos injection
+          ansible.builtin.lineinfile:
+            path: "{{ chaos_log_path }}"
+            create: yes
+            line: |
+              [{{ ansible_date_time.iso8601 }}] NetworkChaos(EXTERNAL): delay={{ network_delay_ms }}ms loss={{ packet_loss_percent }}% corrupt={{ packet_corrupt_percent }}%
+          become: true
+
+        - name: ⏳ Wait for chaos duration
+          ansible.builtin.pause:
+            seconds: "{{ recovery_wait }}"
+
+        - name: 🧹 Remove tc qdisc from host NIC
+          ansible.builtin.shell: |
+            tc qdisc del dev ens160 root || true
+          ignore_errors: yes
+
+        - name: 🪶 Log external recovery
+          ansible.builtin.lineinfile:
+            path: "{{ chaos_log_path }}"
+            create: yes
+            line: |
+              [{{ ansible_date_time.iso8601 }}] NetworkChaos(EXTERNAL): restored to normal state
+          become: true
+
+        - name: ✅ Log external recovery completion
+          ansible.builtin.debug:
+            msg: "[External Mode] 호스트 네트워크 정상 복원 완료."
 

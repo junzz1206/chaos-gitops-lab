@@ -4,5 +4,5 @@ chaos_duration: 180
 disable_autorecover: true
 chaos_log_path: /var/log/chaos_test.log
 service_targets:
-  - paymentservice
+  - productcatalogservice
   - currencyservice

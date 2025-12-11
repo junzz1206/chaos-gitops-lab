@@ -1,0 +1,101 @@
+<!--
+ Copyright 2020 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+{{ define "home" }}
+
+{{ template "header" . }}
+
+<!--─────────────────────────────────────────────
+ Error Banner — 서비스 부분 장애 안내
+─────────────────────────────────────────────-->
+{{ if .ErrorMessage }}
+<div id="error-banner"
+     style="background:#fff3cd;border:1px solid #ffeeba;
+            padding:12px;margin:16px 10%;
+            border-radius:6px;color:#856404;
+            font-weight:500;text-align:center;">
+  ⚠️ 일부 서비스에 문제가 발생했습니다: {{ .ErrorMessage }}
+</div>
+{{ end }}
+
+<div {{ with $.platform_css }} class="{{.}}" {{ end }}>
+  <span class="platform-flag">
+    {{$.platform_name}}
+  </span>
+</div>
+
+<main role="main" class="home">
+
+  <!-- The image at the top of the home page, displayed on smaller screens. -->
+  <div class="home-mobile-hero-banner d-lg-none"></div>
+
+  <div class="container-fluid">
+    <div class="row">
+
+      <!-- The image on the left of the home page, displayed on larger screens. -->
+      <!--<div class="col-4 d-none d-lg-block home-desktop-left-image"></div>-->
+      <!-- @TODO: removed temporarily. When uncommenting, also replace below div with this -->
+      <!--<div class="col-12 col-lg-8">-->
+
+      <div class="col-12 col-lg-12 px-10-percent">
+
+        <div class="row hot-products-row px-xl-6">
+
+          <div class="col-12">
+            <h3>Hot Products</h3>
+          </div>
+
+          {{ range $.products }}
+          <div class="col-md-4 hot-product-card">
+            <a href="{{ $.baseUrl }}/product/{{.Item.Id}}">
+              <img loading="lazy" src="{{ $.baseUrl }}{{.Item.Picture}}">
+              <div class="hot-product-card-img-overlay"></div>
+            </a>
+            <div>
+              <div class="hot-product-card-name">{{ .Item.Name }}</div>
+              <div class="hot-product-card-price">{{ renderMoney .Price }}</div>
+            </div>
+          </div>
+          {{ else }}
+          <!-- 제품이 없을 경우 안내 메시지 -->
+          <div class="col-12 text-center text-muted py-4">
+            현재 표시할 상품이 없습니다.
+          </div>
+          {{ end }}
+
+        </div>
+
+        <!-- Footer for larger screens. -->
+        <div class="row d-none d-lg-block home-desktop-footer-row">
+          <div class="col-12 p-0">
+            {{ template "footer" . }}
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+</main>
+
+<!-- Footer for smaller screens. -->
+<div class="d-lg-none">
+  {{ template "footer" . }}
+</div>
+
+{{ end }}
+

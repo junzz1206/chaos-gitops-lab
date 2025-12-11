@@ -1,0 +1,5 @@
+- name: Test Connection to K3s Node
+  hosts: k3s
+  tasks:
+    - name: ping test
+      ping:

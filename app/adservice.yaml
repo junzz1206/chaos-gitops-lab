@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adservice
+  namespace: app
+  labels:
+    app: adservice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adservice
+  template:
+    metadata:
+      labels:
+        app: adservice
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: adservice
+        image: seongmin14/adservice:v0.10.4  # ← 나중에 직접 빌드한 이미지로 교체 가능
+        ports:
+        - containerPort: 9555
+        readinessProbe:
+          tcpSocket:
+            port: 9555
+          initialDelaySeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: 9555
+          initialDelaySeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adservice
+  namespace: app
+  labels:
+    app: adservice
+spec:
+  type: ClusterIP
+  selector:
+    app: adservice
+  ports:
+  - name: grpc
+    port: 9555
+    targetPort: 9555
+
