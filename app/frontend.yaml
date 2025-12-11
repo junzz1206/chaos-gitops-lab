@@ -24,7 +24,7 @@ metadata:
     app.kubernetes.io/tier: frontend
     app.kubernetes.io/component: frontend
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: frontend
@@ -54,7 +54,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: us-central1-docker.pkg.dev/google-samples/microservices-demo/frontend:v0.10.4
+          image: ghcr.io/junzz1206/ob-frontend:latest
           ports:
           - containerPort: 8080
           readinessProbe:

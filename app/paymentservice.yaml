@@ -53,7 +53,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/google-samples/microservices-demo/paymentservice:v0.10.4
+        image: ghcr.io/junzz1206/ob-paymentservice:latest
         ports:
         - containerPort: 50051
         env:
