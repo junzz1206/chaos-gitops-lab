@@ -24,7 +24,7 @@ metadata:
     app.kubernetes.io/tier: frontend
     app.kubernetes.io/component: frontend
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: frontend
