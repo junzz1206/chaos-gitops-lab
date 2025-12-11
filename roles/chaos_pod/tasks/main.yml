@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # 목적:
 #   - 네임스페이스 내 특정 또는 무작위 Pod 삭제 (라벨 기반)
 #   - disable_autorecover=true 시 ReplicaSet 자동복구 차단
@@ -88,7 +87,7 @@
 
 - name: "Debug - show selected pods"
   ansible.builtin.debug:
-    msg: "🗑️  삭제 대상 Pod: {{ selected_pods }}"
+    msg: "🗑️   삭제 대상 Pod: {{ selected_pods }}"
 
 # Step 5️⃣: Delete selected pods (forced)
 - name: "Delete selected pods (grace-period=0, force)"
@@ -152,7 +151,6 @@
       - deleted_pods: {{ selected_pods | join(', ') }}
       - total_deleted: {{ selected_pods | length }}
       - running_after: {{ recovery_count.stdout }}
-=======
 # Step 1.5️⃣: Dynamic Target Resolution (CI/CD 환경변수 or 파일)
 - name: "Resolve target pod names from environment variable or file"
   vars:
@@ -188,4 +186,3 @@
           - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
           - Effective: {{ target_pod_names | default([]) }}
 
->>>>>>> Stashed changes
