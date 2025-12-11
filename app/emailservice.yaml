@@ -53,7 +53,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: ghcr.io/junzz1206/ob-emailservice:latest
+        image: ghcr.io/junzz1206/ob-cartservice:latest
         ports:
         - containerPort: 8080
         env:
@@ -62,11 +62,17 @@ spec:
         - name: DISABLE_PROFILER
           value: "1"
         readinessProbe:
-          periodSeconds: 5
+          periodSeconds: 10
+          initialDelaySeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 6
           grpc:
             port: 8080
         livenessProbe:
-          periodSeconds: 5
+          periodSeconds: 10
+          initialDelaySeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
           grpc:
             port: 8080
         resources:
