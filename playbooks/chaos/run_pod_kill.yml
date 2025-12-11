@@ -1,21 +1,18 @@
 # ─────────────────────────────────────────────
 # 파일명: playbooks/chaos/run_pod_kill.yml
 # 목적:
-<<<<<<< Updated upstream
 #   - app 네임스페이스 내 임의의 Pod 여러 개를 무작위로 삭제
 #   - 특정 파드(target_pod_names_local) 지정 시 해당 파드만 삭제
 #   - Chaos Monkey 스타일 실험 수행
 #   - 삭제 결과를 로그로 남기고 상태 확인 수행
 # 표준 변수:
 #   target_namespace, kill_count_local, chaos_log_path_local, recovery_wait, target_pod_names_local
-=======
 #   - app 네임스페이스 내 특정 또는 무작위 Pod 삭제
 #   - 지정된 파드(target_pod_names_local 또는 환경변수 TARGET_PODS)만 삭제 가능
 #   - disable_autorecover_local=true 시 해당 서비스 완전 종료 (복구 차단)
 #   - execution_mode 에 따라 순차 / 병렬 실행 전환
 #   - GitLab / ArgoCD 환경 변수 기반 서비스 지정 지원
 #   - ✅ 병렬 모드 시 async 기반 비동기 삭제 수행
->>>>>>> Stashed changes
 # ─────────────────────────────────────────────
 
 - name: Run Targeted or Random Pod Kill Chaos
@@ -24,7 +21,6 @@
 
   vars:
     target_namespace: "app"                       # Chaos 대상 네임스페이스
-<<<<<<< Updated upstream
     kill_count_local: 2                           # 삭제할 파드 개수
     recovery_wait: 10                             # 복구 대기 시간(초)
     chaos_log_path_local: "/var/log/chaos_test.log"
@@ -33,7 +29,6 @@
   tasks:
     # Step 1️⃣: 안전장치 - 네임스페이스 검증
     - name: 🧩 Validate namespace
-=======
     kill_count_local: 2                           # 삭제할 파드 개수 (랜덤 모드용)
     recovery_wait: 60                             # 복구 대기 시간(초)
     chaos_log_path_local: "/var/log/chaos_test.log"
@@ -65,25 +60,20 @@
 
     # Step 2️⃣: 네임스페이스 안전검증
     - name: Validate target namespace
->>>>>>> Stashed changes
       ansible.builtin.assert:
         that:
           - target_namespace == "app"
         fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app 네임스페이스 내에서만 허용됩니다."
         success_msg: "✅ namespace 확인 완료 ('app')"
 
-<<<<<<< Updated upstream
     # Step 2️⃣: Chaos 설정 출력
     - name: 🔍 Print chaos configuration
-=======
     # Step 3️⃣: 실행 정보 출력
     - name: Print chaos configuration
->>>>>>> Stashed changes
       ansible.builtin.debug:
         msg: |
           🧨 Pod Kill Chaos 시작
           - 네임스페이스: {{ target_namespace }}
-<<<<<<< Updated upstream
           - 삭제 개수: {{ kill_count_local }}
           - 지정된 타겟 파드: {{ target_pod_names_local | join(', ') if target_pod_names_local | length > 0 else '없음 (랜덤 선택)' }}
           - 로그 경로: {{ chaos_log_path_local }}
@@ -91,7 +81,6 @@
 
     # Step 3️⃣: chaos_pod 롤 실행
     - name: ⚙️ Execute chaos_pod role
-=======
           - 실행 모드: {{ execution_mode }}
           - 삭제 모드: {{ '지정 파드' if target_pod_names_effective | length > 0 else '무작위' }}
           - 삭제 개수: {{ kill_count_local if target_pod_names_effective | length == 0 else target_pod_names_effective | length }}
@@ -159,25 +148,20 @@
 
     # Step 6️⃣: Chaos Pod Role 실행 (랜덤 모드)
     - name: Execute chaos_pod role
->>>>>>> Stashed changes
       ansible.builtin.include_role:
         name: chaos_pod
       vars:
         target_namespace: "{{ target_namespace }}"
-<<<<<<< Updated upstream
         kill_count_from_playbook: "{{ kill_count_local }}"
         chaos_log_path: "{{ chaos_log_path_local }}"
         target_pod_names: "{{ target_pod_names_local }}"
-=======
         random_pod_kill_count: "{{ kill_count_local }}"
         chaos_log_path: "{{ chaos_log_path_local }}"
         target_pod_names: "{{ target_pod_names_effective }}"
         disable_autorecover: "{{ disable_autorecover_local }}"
->>>>>>> Stashed changes
       ignore_errors: yes
       register: chaos_exec_result
 
-<<<<<<< Updated upstream
     # Step 4️⃣: 복구 대기
     - name: ⏳ Wait before verifying pod recovery
       ansible.builtin.pause:
@@ -185,7 +169,6 @@
 
     # Step 5️⃣: 현재 파드 상태 확인
     - name: 🔎 Verify current pod state
-=======
     # Step 7️⃣: 복구 대기
     - name: Wait before verifying pod recovery
       ansible.builtin.pause:
@@ -193,7 +176,6 @@
 
     # Step 8️⃣: 현재 파드 상태 조회
     - name: Verify current pod states
->>>>>>> Stashed changes
       ansible.builtin.shell: |
         kubectl get pods -n {{ target_namespace }} \
           -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
@@ -201,7 +183,6 @@
       changed_when: false
       ignore_errors: yes
 
-<<<<<<< Updated upstream
     # Step 6️⃣: 결과 출력
     - name: 🧾 Print pod state summary
       ansible.builtin.debug:
@@ -211,7 +192,6 @@
 
     # Step 7️⃣: 로그 파일에 결과 기록
     - name: 🪵 Write chaos summary to log file
-=======
     # Step 9️⃣: 상태 요약 출력
     - name: Print pod state summary
       ansible.builtin.debug:
@@ -221,16 +201,13 @@
 
     # Step 🔟: Chaos 실행 로그 기록
     - name: Write chaos summary to log file
->>>>>>> Stashed changes
       ansible.builtin.lineinfile:
         path: "{{ chaos_log_path_local }}"
         create: yes
         line: |
-<<<<<<< Updated upstream
           [{{ ansible_date_time.iso8601 }}] PodKill: ns={{ target_namespace }} killed={{ kill_count_local }} targets={{ target_pod_names_local | join(', ') if target_pod_names_local | length > 0 else '랜덤' }} result="{{ pod_state.stdout | replace('\n','; ') }}"
       become: true
       when: pod_state is defined
-=======
           [{{ ansible_date_time.iso8601 }}] PodKill mode={{ execution_mode }} \
           ns={{ target_namespace }} \
           killed={{ target_pod_names_effective | length if target_pod_names_effective | length > 0 else kill_count_local }} \
@@ -249,5 +226,3 @@
           - 대상: {{ target_pod_names_effective | join(', ') if target_pod_names_effective | length > 0 else '랜덤 선택' }}
           - 복구 대기: {{ recovery_wait }}초
           - 로그 파일: {{ chaos_log_path_local }}
->>>>>>> Stashed changes
-
