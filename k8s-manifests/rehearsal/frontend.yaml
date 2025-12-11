@@ -54,7 +54,7 @@ spec:
                 - ALL
             privileged: false
             readOnlyRootFilesystem: true
-          image: ghcr.io/junzz1206/online-boutique-frontend:d8bbe9ae7d0004541654093368629e8667249cde
+          image: ghcr.io/hban1/online-boutique-frontend:d8bbe9ae7d0004541654093368629e8667249cde
           ports:
           - containerPort: 8080
           readinessProbe:
