@@ -1,9 +1,0 @@
----
-- name: "🛒 [Chaos 1] 장바구니(cartservice) Pod 강제 종료"
-  shell: |
-    kubectl delete pod -n {{ target_namespace }} -l app=cartservice --force --grace-period=0
-  register: kill_cart_result
-
-- name: "장바구니 Pod 삭제 결과 확인"
-  debug:
-    msg: "Cartservice Pod deleted. Output: {{ kill_cart_result.stdout }}"

@@ -1,9 +1,0 @@
----
-- name: "💳 [Chaos 1] 결제(paymentservice) Pod 강제 종료"
-  shell: |
-    kubectl delete pod -n {{ target_namespace }} -l app=paymentservice --force --grace-period=0
-  register: kill_pay_result
-
-- name: "결제 서비스 Pod 삭제 결과 확인"
-  debug:
-    msg: "Paymentservice Pod deleted. Output: {{ kill_pay_result.stdout }}"
