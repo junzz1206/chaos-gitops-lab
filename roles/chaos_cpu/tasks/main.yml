@@ -94,18 +94,18 @@
           echo "[CHAOS] Injecting CPU stress into $svc ($POD)..."
 
           # Pod 내부에서 CPU 부하 수행
-          kubectl exec -n {{ target_namespace }} $POD -- sh -c "
+          kubectl exec -n {{ target_namespace }} $POD -- sh -c '
             if command -v yes >/dev/null 2>&1; then              # 'yes' 명령이 존재하는지 확인
               yes > /dev/null &                                  # yes 명령으로 CPU 100% 부하 발생
-              PID=\$!                                            # yes 프로세스의 PID 저장
+              PID=$!                                            # yes 프로세스의 PID 저장
               sleep {{ chaos_duration }}                         # 지정된 시간 동안 유지
-              kill \$PID 2>/dev/null || true                     # 프로세스 종료 (실패 무시)
-              echo '[DONE] CPU stress completed for ${svc}'      # 완료 로그 출력
+              kill $PID 2>/dev/null || true                     # 프로세스 종료 (실패 무시)
+              echo "[DONE] CPU stress completed for $svc"        # 완료 로그 출력
             else
-              echo '[WARN] yes command not found in container for ${svc}'  # yes 명령 없음
+              echo "[WARN] yes command not found in container for $svc"  # yes 명령 없음
               exit 42                                            # 실패 코드 42 반환 (fallback 트리거)
             fi
-          " || failed_services=\"\$failed_services \$svc\"       # 실패한 서비스 누적 기록
+          ' || failed_services="$failed_services $svc"           # 실패한 서비스 누적 기록
         done
 
         # 내부 실패 감지 (하나라도 실패 시 종료 코드 99 반환)
@@ -153,15 +153,15 @@
             --restart=Never \                                    # 단발성 Pod로 실행
             -n {{ target_namespace }} \                          # 네임스페이스 지정
             --labels="chaos-target=$svc" \                       # Chaos 대상 서비스 라벨 추가
-            --command -- sh -c "                                 # 컨테이너 내부 명령 실행
+            --command -- sh -c '
               set -eux;                                          # 에러 발생 시 중단 + 디버그 출력
-              apk add --no-cache stress-ng || (echo '[WARN] apk install failed, retrying...' && apk update && apk add --no-cache stress-ng);  # stress-ng 설치 (재시도 포함)
-              echo '[CHAOS] Running stress-ng for {{ chaos_duration }}s on ${svc}...';  # 실행 로그
-              stress-ng -c 0 -l 100 --matrix 64 --vm 16 --vm-bytes 95% --hdd 4 \        # CPU, 메모리, I/O 종합 부하
-                --timeout {{ chaos_duration }}s --metrics-brief || echo '[WARN] stress-ng encountered non-critical error';  # 실행 중 경고 무시
-              echo '[DONE] CPU stress complete for ${svc}';       # 완료 로그 출력
+              apk add --no-cache stress-ng || (echo "[WARN] apk install failed, retrying..." && apk update && apk add --no-cache stress-ng);  # stress-ng 설치 (재시도 포함)
+              echo "[CHAOS] Running stress-ng for {{ chaos_duration }}s on ${svc}...";  # 실행 로그
+              stress-ng -c 0 -l 100 --matrix 64 --vm 16 --vm-bytes 95% --hdd 4 \
+                --timeout {{ chaos_duration }}s --metrics-brief || echo "[WARN] stress-ng encountered non-critical error";  # 실행 중 경고 무시
+              echo "[DONE] CPU stress complete for ${svc}";       # 완료 로그 출력
               sleep 1;                                            # 종료 전 대기
-            " || true                                             # 실패해도 전체 중단 방지
+            ' || true                                             # 실패해도 전체 중단 방지
         done
       register: external_stress_result                           # 실행 결과 저장
       ignore_errors: yes                                         # 오류 무시 (다음 Task로 진행)
