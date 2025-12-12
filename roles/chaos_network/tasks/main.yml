@@ -15,150 +15,162 @@
 # 1️⃣ Safety Check - 네임스페이스 확인
 # ─────────────────────────────────────────────
 - name: Safety Check - Confirm namespace  # 네임스페이스 유효성 확인
-  ansible.builtin.assert:  # assert 모듈 사용
-    that:  # 검사 조건 정의
-      - target_namespace == "app"  # target_namespace가 반드시 app이어야 함
-    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행해야 합니다."  # 실패 시 메시지
-    success_msg: "✅ namespace 확인 완료"  # 성공 시 메시지
+  ansible.builtin.assert:
+    that:
+      - target_namespace == "app"  # 반드시 app 네임스페이스에서만 실행
+    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행해야 합니다."
+    success_msg: "✅ namespace 확인 완료"
 
 # ─────────────────────────────────────────────
 # 2️⃣ 기본값 및 환경변수 설정
 # ─────────────────────────────────────────────
 - name: Set default and environment-driven variables  # 환경 변수 및 기본값 설정
-  ansible.builtin.set_fact:  # set_fact로 변수 정의
-    net_mode: "{{ lookup('env','NET_MODE') | default(net_mode | default('internal'), true) }}"  # internal/external 모드 설정
-    network_delay_ms: "{{ lookup('env','NETWORK_DELAY_MS') | default(network_delay_ms | default(3000), true) }}"  # 네트워크 지연 시간(ms)
-    packet_loss_percent: "{{ lookup('env','PACKET_LOSS_PERCENT') | default(packet_loss_percent | default(5), true) }}"  # 패킷 손실률(%)
-    packet_corrupt_percent: "{{ lookup('env','PACKET_CORRUPT_PERCENT') | default(packet_corrupt_percent | default(0), true) }}"  # 패킷 손상률(%)
-    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default(60), true) | int }}"  # Chaos 지속 시간(초)
-    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"  # 환경변수에서 대상 서비스 목록 가져오기
-    default_services:  # 환경변수 없을 경우 사용할 기본 서비스
-      - frontend  # 프론트엔드
-      - productcatalogservice  # 상품 카탈로그
-      - cartservice  # 장바구니
-      - checkoutservice  # 결제 처리
-      - paymentservice  # 결제 서비스
-      - shippingservice  # 배송 서비스
-      - emailservice  # 이메일 알림
-      - redis-cart  # Redis 캐시
-    effective_target_services: >-  # 최종 대상 서비스 계산
+  ansible.builtin.set_fact:
+    net_mode: "{{ lookup('env','NET_MODE') | default(net_mode | default('internal'), true) }}"  # internal/external 모드 결정
+    network_delay_ms: "{{ lookup('env','NETWORK_DELAY_MS') | default(network_delay_ms | default(3000), true) }}"  # 지연시간(ms)
+    packet_loss_percent: "{{ lookup('env','PACKET_LOSS_PERCENT') | default(packet_loss_percent | default(5), true) }}"  # 손실률(%)
+    packet_corrupt_percent: "{{ lookup('env','PACKET_CORRUPT_PERCENT') | default(packet_corrupt_percent | default(0), true) }}"  # 손상률(%)
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default(60), true) | int }}"  # 지속시간(초)
+    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"  # 환경변수 TARGET_SERVICES에서 대상 목록 가져오기
+    default_services:  # 환경변수 없을 경우 기본 서비스 목록
+      - frontend
+      - productcatalogservice
+      - cartservice
+      - checkoutservice
+      - paymentservice
+      - shippingservice
+      - emailservice
+      - redis-cart
+    effective_target_services: >-  # 최종 타겟 서비스 결정
       {{
-        (env_target_services.split(',') | map('trim') | list)  # 환경변수 기반 서비스 목록
-        if env_target_services | length > 0  # 환경변수가 존재할 경우
-        else default_services  # 그렇지 않으면 기본 서비스 목록 사용
+        (env_target_services.split(',') | map('trim') | list)
+        if env_target_services | length > 0
+        else default_services
       }}
-  changed_when: false  # 변경 감지 비활성화 (변수 설정만 수행)
+  changed_when: false  # 상태 변경 감지 비활성화
 
-- name: Display chaos configuration  # 현재 Chaos 설정 출력
-  ansible.builtin.debug:  # debug 모듈 사용
-    msg: |  # 여러 줄 출력
-      ⚙️ Network Chaos Configuration  # 설정 요약 시작
-      - Mode: {{ net_mode }}  # 실행 모드 표시
-      - Duration: {{ chaos_duration }}s  # 지속 시간 표시
-      - Delay: {{ network_delay_ms }}ms  # 지연 시간 표시
-      - Loss: {{ packet_loss_percent }}%  # 손실률 표시
-      - Corrupt: {{ packet_corrupt_percent }}%  # 손상률 표시
-      - Targets: {{ effective_target_services | join(', ') }}  # 타겟 서비스 목록 표시
+- name: Display chaos configuration  # Chaos 설정 디버그 출력
+  ansible.builtin.debug:
+    msg: |
+      ⚙️ Network Chaos Configuration
+      - Mode: {{ net_mode }}
+      - Duration: {{ chaos_duration }}s
+      - Delay: {{ network_delay_ms }}ms
+      - Loss: {{ packet_loss_percent }}%
+      - Corrupt: {{ packet_corrupt_percent }}%
+      - Targets: {{ effective_target_services | join(', ') }}
 
 # ─────────────────────────────────────────────
 # 3️⃣ Internal Mode - Pod 내부 netem 주입
 # ─────────────────────────────────────────────
-- name: Apply network chaos internally per service  # 내부 실행 블록
+- name: Apply network chaos internally per service  # internal 모드 실행 블록
   when: net_mode == "internal"  # 조건: internal 모드일 때만 실행
-  ansible.builtin.shell: |  # 셸 스크립트 실행
-    failed_services=""  # 실패한 서비스 목록 초기화
-    for svc in {{ effective_target_services | join(' ') }}; do  # 모든 서비스에 대해 반복
-      echo "[INFO] Target: $svc — applying internal netem..."  # 현재 서비스 출력
-      POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc \  # Pod 이름 추출
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)  # 첫 번째 Pod만 사용
-      if [ -z "$POD" ]; then  # Pod가 없을 경우
-        echo "[SKIP] $svc: No running pods."  # 건너뛰기
-        continue  # 다음 서비스로 이동
-      fi  # 조건문 종료
-      kubectl exec -n {{ target_namespace }} $POD -- sh -c "which tc" >/dev/null 2>&1 || failed_services="$failed_services $svc"  # tc 존재 여부 확인, 없으면 실패 목록에 추가
-      echo "[CHAOS] Applying netem to $svc ($POD)..."  # chaos 시작 로그
-      kubectl exec -n {{ target_namespace }} $POD -- tc qdisc del dev eth0 root || true  # 기존 qdisc 제거 (중복 방지)
-      kubectl exec -n {{ target_namespace }} $POD -- tc qdisc add dev eth0 root netem \  # 새 qdisc 추가
-        delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}% || failed_services="$failed_services $svc"  # netem 인젝션 및 실패 기록
-    done  # for문 종료
-    if [ -n "$failed_services" ]; then  # 실패 서비스가 존재할 경우
-      echo "[WARN] Internal netem failed for:$failed_services"  # 경고 출력
-      exit 99  # exit code 99 → fallback 트리거
-    fi  # 조건문 종료
-  register: internal_netem_result  # 실행 결과 저장
-  ignore_errors: yes  # 오류 무시 (fallback 유도)
-  changed_when: true  # 시스템 변경으로 표시
+  ansible.builtin.shell: |
+    failed_services=""  # 실패 서비스 초기화
+    for svc in {{ effective_target_services | join(' ') }}; do  # 서비스별 반복
+      echo "[INFO] Target: $svc — applying internal netem..."
+      POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)  # 첫 번째 Pod 선택
+      if [ -z "$POD" ]; then
+        echo "[SKIP] $svc: No running pods."
+        continue
+      fi
+      kubectl exec -n {{ target_namespace }} $POD -- sh -c "which tc" >/dev/null 2>&1 || failed_services="$failed_services $svc"
+      echo "[CHAOS] Applying netem to $svc ($POD)..."
+      kubectl exec -n {{ target_namespace }} $POD -- tc qdisc del dev eth0 root || true
+      kubectl exec -n {{ target_namespace }} $POD -- tc qdisc add dev eth0 root netem \
+        delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}% || failed_services="$failed_services $svc"
+    done
+    if [ -n "$failed_services" ]; then
+      echo "[WARN] Internal netem failed for:$failed_services"
+      exit 99  # 실패 시 fallback 유도
+    fi
+  register: internal_netem_result
+  ignore_errors: yes  # 오류 무시 (fallback 위해)
+  changed_when: true
 
 # ─────────────────────────────────────────────
 # 4️⃣ Internal 실패 시 External로 전환
 # ─────────────────────────────────────────────
-- name: Switch to external mode on internal failure  # internal 실패 시 모드 전환
-  when: net_mode == "internal" and internal_netem_result.rc is defined and internal_netem_result.rc != 0  # 조건: internal 실패 시
-  ansible.builtin.set_fact:  # fact 설정
-    net_mode: "external"  # external로 변경
-  changed_when: true  # 변경 감지
+- name: Switch to external mode on internal failure
+  when: net_mode == "internal" and internal_netem_result.rc is defined and internal_netem_result.rc != 0
+  ansible.builtin.set_fact:
+    net_mode: "external"  # external 모드로 전환
+  changed_when: true
 
-- name: Fallback notice  # fallback 안내 출력
-  when: net_mode == "external"  # external 모드일 경우
-  ansible.builtin.debug:  # debug 출력
-    msg: "⚠️ Internal netem injection failed → Switching to external mode (per-service pods)."  # 안내 메시지
+- name: Fallback notice
+  when: net_mode == "external"
+  ansible.builtin.debug:
+    msg: "⚠️ Internal netem injection failed → Switching to external mode (per-service pods)."
 
 # ─────────────────────────────────────────────
-# 5️⃣ External Mode - 서비스별 Chaos Pod 생성
+# 5️⃣ External Mode - 서비스별 Chaos Pod 생성 (공통 라벨 적용)
 # ─────────────────────────────────────────────
-- name: Apply external network chaos (per-service helper pods)  # external 실행 블록
-  when: net_mode == "external"  # external 모드일 때만 실행
-  ansible.builtin.shell: |  # 셸 스크립트 실행
-    for svc in {{ effective_target_services | join(' ') }}; do  # 모든 서비스 반복
-      echo "[EXTERNAL] Launching chaos pod for ${svc}..."  # 서비스별 실행 로그
-      SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-6)  # 6자리 UUID 접미사 생성
-      kubectl run net-chaos-${svc}-${SUFFIX} \  # chaos pod 이름에 접미사 추가하여 중복 방지
-        --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \  # 네임스페이스 지정 및 일회성 pod 설정
-        --labels="chaos-target=${svc}" \  # chaos-target 라벨 부여
-        --overrides='{  # pod 정의 오버라이드 시작
+- name: Apply external network chaos (per-service helper pods)
+  when: net_mode == "external"
+  ansible.builtin.shell: |
+    for svc in {{ effective_target_services | join(' ') }}; do
+      echo "[EXTERNAL] Launching chaos pod for ${svc}..."
+      SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-6)  # 고유 접미사 생성
+
+      # ✅ 공통 라벨 표준 적용 + tier 자동 분기
+      if [ "$svc" = "frontend" ]; then
+        TIER="frontend"
+      elif [ "$svc" = "redis-cart" ]; then
+        TIER="data"
+      else
+        TIER="backend"
+      fi
+
+      LABELS="app=${svc},app.kubernetes.io/name=${svc},app.kubernetes.io/part-of=online-boutique-chaos-lab,app.kubernetes.io/tier=${TIER},app.kubernetes.io/component=network-chaos"
+
+      kubectl run net-chaos-${svc}-${SUFFIX} \
+        --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \
+        --labels="${LABELS}" \  # 표준 라벨 부여
+        --overrides='{  
           "spec": {
-            "containers": [{  # 컨테이너 정의
-              "name": "net-chaos",  # 컨테이너 이름
-              "image": "nicolaka/netshoot:latest",  # 이미지 지정
-              "securityContext": { "capabilities": { "add": ["NET_ADMIN"] } },  # NET_ADMIN 권한 부여
-              "command": ["/bin/sh", "-c"],  # 명령 실행 방식
-              "args": [  # 명령 인자
-                "set -eux; \  # 오류 발생 시 중단 및 디버깅 출력
-                 echo \"[CHAOS] ${svc}: delay={{ network_delay_ms }}ms loss={{ packet_loss_percent }}% corrupt={{ packet_corrupt_percent }}%\"; \  # 시작 로그
-                 tc qdisc add dev eth0 root netem delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}%; \  # netem 주입
-                 sleep {{ chaos_duration }}; \  # chaos 유지
-                 echo \"[RECOVERY] Restoring network (${svc})...\"; \  # 복구 로그 출력
-                 tc qdisc del dev eth0 root || true; \  # qdisc 제거
-                 echo \"[SELF-DELETE] Cleaning up chaos pod (${svc})...\"; \  # 삭제 로그 출력
-                 kubectl delete pod $(hostname) -n {{ target_namespace }} --force --grace-period=0 || true;"  # 자기 자신 pod 삭제
-              ]  # args 종료
-            }]  # 컨테이너 배열 종료
-          }  # spec 종료
-        }' || true  # 실패 시 무시
-    done  # for문 종료
-  register: external_netem_result  # 실행 결과 저장
-  ignore_errors: yes  # 오류 무시 (개별 pod 실패 대비)
-  changed_when: true  # 변경 발생으로 표시
+            "containers": [{
+              "name": "net-chaos",
+              "image": "nicolaka/netshoot:latest",
+              "securityContext": { "capabilities": { "add": ["NET_ADMIN"] } },
+              "command": ["/bin/sh", "-c"],
+              "args": [
+                "set -eux; \
+                 echo \"[CHAOS] ${svc}: delay={{ network_delay_ms }}ms loss={{ packet_loss_percent }}% corrupt={{ packet_corrupt_percent }}%\"; \
+                 tc qdisc add dev eth0 root netem delay {{ network_delay_ms }}ms loss {{ packet_loss_percent }}% corrupt {{ packet_corrupt_percent }}%; \
+                 sleep {{ chaos_duration }}; \
+                 echo \"[RECOVERY] Restoring network (${svc})...\"; \
+                 tc qdisc del dev eth0 root || true; \
+                 echo \"[SELF-DELETE] Cleaning up chaos pod (${svc})...\"; \
+                 kubectl delete pod $(hostname) -n {{ target_namespace }} --force --grace-period=0 || true;"
+              ]
+            }]
+          }
+        }' || true
+    done
+  register: external_netem_result
+  ignore_errors: yes
+  changed_when: true
 
-- name: Show external result  # external 결과 출력
-  ansible.builtin.debug:  # debug 사용
-    msg: "{{ external_netem_result.stdout | default('No external chaos output') }}"  # 결과 출력
+- name: Show external result
+  ansible.builtin.debug:
+    msg: "{{ external_netem_result.stdout | default('No external chaos output') }}"
 
 # ─────────────────────────────────────────────
 # 6️⃣ Chaos 유지 및 최종 안내
 # ─────────────────────────────────────────────
-- name: Wait for chaos duration  # Chaos 지속 시간 대기
-  ansible.builtin.pause:  # pause 모듈 사용
-    seconds: "{{ chaos_duration }}"  # chaos_duration 값만큼 대기
+- name: Wait for chaos duration
+  ansible.builtin.pause:
+    seconds: "{{ chaos_duration }}"  # chaos 유지 시간만큼 대기
 
-- name: Final notice  # 최종 완료 메시지 출력
-  ansible.builtin.debug:  # debug 모듈 사용
-    msg: |  # 멀티라인 출력
-      ✅ Network Chaos Injection Complete  # 완료 메시지
-      - Mode: {{ net_mode }}  # 최종 실행 모드 표시
-      - Duration: {{ chaos_duration }}s  # 지속 시간 표시
-      - Delay: {{ network_delay_ms }}ms  # 네트워크 지연 표시
-      - Loss: {{ packet_loss_percent }}%  # 손실률 표시
-      - Corrupt: {{ packet_corrupt_percent }}%  # 손상률 표시
-      - Targets: {{ effective_target_services | join(', ') }}  # 서비스 목록 표시
-      - ⚠️ 복구는 restore_all.yml에서 수행됩니다.  # 복구 관련 주의
+- name: Final notice
+  ansible.builtin.debug:
+    msg: |
+      ✅ Network Chaos Injection Complete
+      - Mode: {{ net_mode }}
+      - Duration: {{ chaos_duration }}s
+      - Delay: {{ network_delay_ms }}ms
+      - Loss: {{ packet_loss_percent }}%
+      - Corrupt: {{ packet_corrupt_percent }}%
+      - Targets: {{ effective_target_services | join(', ') }}
+      - ⚠️ 복구는 restore_all.yml에서 수행됩니다.
