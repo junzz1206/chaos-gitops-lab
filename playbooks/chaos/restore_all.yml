@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────
-# 파일명: playbooks/chaos/restore_all.yml
+# 파일명: playbooks/chaos/restore_all.yml  # 파일 경로
 # 목적:
 #   - CPU / Network chaos 부하 완전 복구
 #   - 임시 Chaos Pod 및 리소스 정리
@@ -8,227 +8,239 @@
 #   - ✅ GitLab / ArgoCD / Jenkins 등 CI/CD 환경 완전 호환
 # ─────────────────────────────────────────────
 
-- name: 🛠️ Perform Unified Chaos Recovery (CI/CD Compatible)
-  hosts: k3s_master
-  become: yes
+- name: Perform Unified Chaos Recovery (CI/CD Compatible)  # 플레이 이름
+  hosts: k3s_master  # 타겟 호스트
+  become: yes  # 루트 권한 필요
 
-  vars:
-    # CI/CD 환경 변수 기반 설정 (fallback 포함)
-    target_namespace: "{{ lookup('env','TARGET_NAMESPACE') | default('app', true) }}"
-    chaos_log_path: "{{ lookup('env','CHAOS_LOG_PATH') | default('/var/log/chaos_test.log', true) }}"
-    recovery_wait: "{{ lookup('env','RECOVERY_WAIT') | default(15, true) | int }}"
-    recovery_targets: >-
+  vars:  # 환경 변수 및 기본값 정의
+    target_namespace: "{{ lookup('env','TARGET_NAMESPACE') | default('app', true) }}"  # 네임스페이스
+    chaos_log_path: "{{ lookup('env','CHAOS_LOG_PATH') | default('/var/log/chaos_test.log', true) }}"  # 로그 경로
+    recovery_wait: "{{ lookup('env','RECOVERY_WAIT') | default(15, true) | int }}"  # 복구 대기시간
+    recovery_targets: >-  # 복구 대상 서비스 목록
       {{ lookup('env','RECOVERY_TARGETS') |
          default('cartservice,checkoutservice,paymentservice,redis-cart,currencyservice,shippingservice,frontend,emailservice,productcatalogservice,recommendationservice', true)
-         .split(',') }}
+         .split(',') }}  # 쉼표 구분 후 리스트 변환
 
-  tasks:
+  tasks:  # 작업 목록 시작
 
     # ─────────────────────────────────────────────
     # 0️⃣ CPU / Network Chaos 복원
     # ─────────────────────────────────────────────
-    - name: Restore CPU and network chaos (internal + external)
-      block:
-        - ansible.builtin.shell: |
-            echo "[CLEANUP] Restoring CPU and network chaos effects..."
+    - name: Restore CPU and network chaos (internal + external)  # Chaos 복원 블록
+      block:  # 블록 시작
+        - ansible.builtin.shell: |  # 셸 스크립트 실행
+            echo "[CLEANUP] Restoring CPU and network chaos effects..."  # 로그 출력
 
             # 노드 단위 복원
-            echo "[NODE] Cleaning tc qdisc & killing stress-ng on nodes..."
-            kubectl run chaos-cleaner --image=alpine --restart=Never -n {{ target_namespace }} --overrides='{
+            echo "[NODE] Cleaning tc qdisc & killing stress-ng on nodes..."  # 노드 레벨 복원 안내
+            kubectl run chaos-cleaner --image=alpine:3.19 --restart=Never -n {{ target_namespace }} --overrides='{  # cleanup pod 실행
+              "metadata": {
+                "labels": {
+                  "app": "chaos-cleaner",
+                  "app.kubernetes.io/name": "chaos-cleaner",
+                  "app.kubernetes.io/part-of": "online-boutique-chaos-lab",
+                  "app.kubernetes.io/component": "recovery",
+                  "app.kubernetes.io/tier": "backend"
+                }
+              },
               "spec": {
                 "hostPID": true,
                 "containers": [{
                   "name": "cleanup",
-                  "image": "alpine",
+                  "image": "alpine:3.19",
                   "securityContext": { "privileged": true },
                   "command": ["sh","-c",
                     "apk add --no-cache iproute2 procps >/dev/null; \
                      tc qdisc del dev eth0 root 2>/dev/null || true; \
                      pkill stress-ng 2>/dev/null || true; \
-                     echo [OK] Node-level cleanup done."]
+                     echo [OK] Node-level cleanup done.; \
+                     kubectl delete pod $(hostname) -n {{ target_namespace }} --force --grace-period=0 || true"]
                 }]
               }
-            }' || true
+            }' || true  # 실패 무시
 
             # Pod 내부 복원
-            echo "[POD] Cleaning tc & stress-ng inside pods..."
-            PODS=$(kubectl get pods -n {{ target_namespace }} -o jsonpath='{.items[*].metadata.name}')
-            for POD in $PODS; do
-              kubectl exec -n {{ target_namespace }} $POD -- sh -c "
-                if command -v tc >/dev/null 2>&1; then tc qdisc del dev eth0 root 2>/dev/null || true; fi
-                if command -v pkill >/dev/null 2>&1; then pkill stress-ng 2>/dev/null || true; fi
+            echo "[POD] Cleaning tc & stress-ng inside pods..."  # Pod 내부 복원 시작
+            PODS=$(kubectl get pods -n {{ target_namespace }} -o jsonpath='{.items[*].metadata.name}')  # 모든 Pod 목록 추출
+            for POD in $PODS; do  # Pod 반복
+              kubectl exec -n {{ target_namespace }} $POD -- sh -c "  # 내부 명령 실행
+                if command -v tc >/dev/null 2>&1; then tc qdisc del dev eth0 root 2>/dev/null || true; fi;  # 네트워크 복원
+                if command -v pkill >/dev/null 2>&1; then pkill stress-ng 2>/dev/null || true; fi;  # CPU 부하 종료
               " || true
-            done
+            done  # 반복 종료
 
-            echo "[DONE] CPU/Network chaos recovery completed."
-          register: cleanup_result
-          ignore_errors: yes
-          changed_when: true
+            echo "[DONE] CPU/Network chaos recovery completed."  # 완료 로그 출력
+          register: cleanup_result  # 결과 저장
+          ignore_errors: yes  # 오류 무시
+          changed_when: true  # 변경 발생으로 간주
 
-      rescue:
-        - name: Handle manual cancellation during CI/CD
+      rescue:  # 오류 발생 시 처리
+        - name: Handle manual cancellation during CI/CD  # 수동 중단 처리
           ansible.builtin.debug:
-            msg: "🛑 CI/CD manual stop detected — Recovery aborted safely."
+            msg: "🛑 CI/CD manual stop detected — Recovery aborted safely."  # 중단 안내 메시지
 
-        - name: Log abort state
+        - name: Log abort state  # 중단 상태 로그 기록
           ansible.builtin.lineinfile:
-            path: "{{ chaos_log_path }}"
-            create: yes
-            line: "[{{ ansible_date_time.iso8601 }}] Recovery aborted manually (CI/CD stop)"
-          become: yes
+            path: "{{ chaos_log_path }}"  # 로그 경로
+            create: yes  # 없으면 생성
+            line: "[{{ ansible_date_time.iso8601 }}] Recovery aborted manually (CI/CD stop)"  # 로그 작성
+          become: yes  # 루트 권한으로 기록
+          failed_when: false  # rescue 내 오류 방지
 
-        - ansible.builtin.meta: end_play
+        - ansible.builtin.meta: end_play  # 이후 task 중단
 
-    - name: Show cleanup summary
+    - name: Show cleanup summary  # 복원 결과 출력
       ansible.builtin.debug:
-        var: cleanup_result.stdout_lines
+        var: cleanup_result.stdout_lines  # 셸 출력 표시
 
     # ─────────────────────────────────────────────
     # 1️⃣ Chaos 관련 임시 Pod 정리
     # ─────────────────────────────────────────────
-    - name: Delete leftover chaos pods
+    - name: Delete leftover chaos pods  # 남은 chaos pod 삭제
       ansible.builtin.shell: |
-        CHAOS_PODS=$(kubectl get pods -n {{ target_namespace }} -o name | grep -E '^pod/(cpu-stress|net-chaos|network-chaos|svc-chaos)' || true)
-        if [ -n "$CHAOS_PODS" ]; then
-          echo "[CLEANUP] Removing chaos pods..."
-          for p in $CHAOS_PODS; do
-            kubectl delete $p -n {{ target_namespace }} --grace-period=0 --force || true
+        CHAOS_PODS=$(kubectl get pods -n {{ target_namespace }} -o name | grep -E '^pod/(cpu|net|network|svc|chaos)-' || true)  # chaos 관련 패턴 검색
+        if [ -n "$CHAOS_PODS" ]; then  # 존재하면
+          echo "[CLEANUP] Removing chaos pods..."  # 로그 출력
+          for p in $CHAOS_PODS; do  # 반복
+            kubectl delete $p -n {{ target_namespace }} --grace-period=0 --force || true  # 강제 삭제
           done
         else
-          echo "[INFO] No chaos pods found."
+          echo "[INFO] No chaos pods found."  # 없을 경우 로그
         fi
-      register: pod_cleanup
-      ignore_errors: yes
-      changed_when: true
+      register: pod_cleanup  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: true  # 변경 발생으로 간주
 
-    - name: Show chaos pod cleanup result
+    - name: Show chaos pod cleanup result  # chaos pod 정리 결과 출력
       ansible.builtin.debug:
-        var: pod_cleanup.stdout_lines
+        var: pod_cleanup.stdout_lines  # 결과 표시
 
     # ─────────────────────────────────────────────
     # 2️⃣ Namespace 검증
     # ─────────────────────────────────────────────
-    - name: Validate target namespace
+    - name: Validate target namespace  # 네임스페이스 검증
       ansible.builtin.assert:
         that:
-          - target_namespace == "app"
-        fail_msg: "❌ namespace가 'app'이 아닙니다. 복구는 app 네임스페이스 내에서만 수행됩니다."
-        success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
+          - target_namespace == "app"  # app 네임스페이스 확인
+        fail_msg: "❌ namespace가 'app'이 아닙니다. 복구는 app 네임스페이스 내에서만 수행됩니다."  # 실패 시 메시지
+        success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"  # 성공 메시지
 
     # ─────────────────────────────────────────────
     # 3️⃣ scale 0 → 1 복원
     # ─────────────────────────────────────────────
-    - name: Restore deployments scaled to zero
+    - name: Restore deployments scaled to zero  # 0으로 줄어든 Deployment 복원
       ansible.builtin.shell: |
-        for svc in {{ recovery_targets | join(' ') }}; do
-          replicas=$(kubectl get deploy $svc -n {{ target_namespace }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
-          if [ "$replicas" = "0" ]; then
-            echo "[RESTORE] Scaling $svc from 0 → 1"
-            kubectl scale deploy $svc -n {{ target_namespace }} --replicas=1 || true
+        for svc in {{ recovery_targets | join(' ') }}; do  # 서비스 반복
+          if kubectl get deploy $svc -n {{ target_namespace }} >/dev/null 2>&1; then  # 존재 확인
+            replicas=$(kubectl get deploy $svc -n {{ target_namespace }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
+            if [ "$replicas" = "0" ]; then  # replicas=0이면
+              echo "[RESTORE] Scaling $svc from 0 → 1"  # 로그 출력
+              kubectl scale deploy $svc -n {{ target_namespace }} --replicas=1 || true  # 복원
+            fi
           fi
         done
-      register: scale_restore
-      ignore_errors: yes
-      changed_when: true
+      register: scale_restore  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: true  # 변경 발생
 
-    - name: Show scale restore output
+    - name: Show scale restore output  # 스케일 복원 결과 출력
       ansible.builtin.debug:
-        var: scale_restore.stdout_lines
+        var: scale_restore.stdout_lines  # 출력 표시
 
     # ─────────────────────────────────────────────
     # 4️⃣ 누락 Deployment 재배포
     # ─────────────────────────────────────────────
-    - name: Redeploy missing services
+    - name: Redeploy missing services  # 누락된 서비스 재배포
       ansible.builtin.shell: |
-        for svc in {{ recovery_targets | join(' ') }}; do
-          if ! kubectl get deploy $svc -n {{ target_namespace }} >/dev/null 2>&1; then
-            if [ -f "{{ playbook_dir }}/../app/$svc.yaml" ]; then
-              echo "[AUTO-DEPLOY] Recreating missing $svc"
-              kubectl apply -f {{ playbook_dir }}/../app/$svc.yaml || true
+        for svc in {{ recovery_targets | join(' ') }}; do  # 반복
+          if ! kubectl get deploy $svc -n {{ target_namespace }} >/dev/null 2>&1; then  # 배포 존재 확인
+            if [ -f "{{ playbook_dir }}/../app/$svc.yaml" ]; then  # yaml 존재 확인
+              echo "[AUTO-DEPLOY] Recreating missing $svc"  # 로그 출력
+              kubectl apply -f {{ playbook_dir }}/../app/$svc.yaml || true  # 재배포
             fi
           fi
         done
-      register: redeploy_result
-      ignore_errors: yes
-      changed_when: true
+      register: redeploy_result  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: true  # 변경 감지
 
-    - name: Show redeploy actions
+    - name: Show redeploy actions  # 재배포 결과 출력
       ansible.builtin.debug:
-        var: redeploy_result.stdout_lines
+        var: redeploy_result.stdout_lines  # 출력 표시
 
     # ─────────────────────────────────────────────
     # 5️⃣ Ready ≠ Desired → Rollout 재시작
     # ─────────────────────────────────────────────
-    - name: Restart unready deployments
+    - name: Restart unready deployments  # Ready 상태 불일치 시 롤아웃 재시작
       ansible.builtin.shell: |
-        for svc in {{ recovery_targets | join(' ') }}; do
+        for svc in {{ recovery_targets | join(' ') }}; do  # 반복
           desired=$(kubectl get deploy $svc -n {{ target_namespace }} -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
           ready=$(kubectl get deploy $svc -n {{ target_namespace }} -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-          if [ "$desired" != "$ready" ]; then
-            echo "[ROLLBACK] Restarting $svc (Desired=$desired, Ready=$ready)"
-            kubectl rollout restart deploy $svc -n {{ target_namespace }} || true
+          if [ "$desired" != "$ready" ]; then  # 불일치 시
+            echo "[ROLLBACK] Restarting $svc (Desired=$desired, Ready=$ready)"  # 로그 출력
+            kubectl rollout restart deploy $svc -n {{ target_namespace }} || true  # 재시작 수행
           fi
         done
-      register: restart_unready
-      ignore_errors: yes
-      changed_when: true
+      register: restart_unready  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: true  # 변경 발생으로 간주
 
-    - name: Show restart actions
+    - name: Show restart actions  # 재시작 결과 출력
       ansible.builtin.debug:
-        var: restart_unready.stdout_lines
+        var: restart_unready.stdout_lines  # 출력 표시
 
     # ─────────────────────────────────────────────
     # 6️⃣ redis-cart ↔ cartservice 의존성 정렬
     # ─────────────────────────────────────────────
-    - name: Re-sync cartservice after redis-cart ready
+    - name: Re-sync cartservice after redis-cart ready  # 의존성 복구
       ansible.builtin.shell: |
-        kubectl rollout status deploy/redis-cart -n {{ target_namespace }} --timeout=120s || true
-        kubectl rollout restart deploy/cartservice -n {{ target_namespace }} || true
-      register: cart_sync
-      ignore_errors: yes
-      changed_when: true
+        kubectl rollout status deploy/redis-cart -n {{ target_namespace }} --timeout=180s || true  # Redis 안정화 대기
+        kubectl rollout restart deploy/cartservice -n {{ target_namespace }} || true  # Cartservice 재시작
+      register: cart_sync  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: true  # 변경 감지
 
-    - name: Show cartservice sync result
+    - name: Show cartservice sync result  # 동기화 결과 출력
       ansible.builtin.debug:
-        var: cart_sync.stdout_lines
+        var: cart_sync.stdout_lines  # 출력 표시
 
     # ─────────────────────────────────────────────
     # 7️⃣ 안정화 대기 및 최종 상태 확인
     # ─────────────────────────────────────────────
-    - name: Wait for recovery stabilization
+    - name: Wait for recovery stabilization  # 복구 안정화 대기
       ansible.builtin.pause:
-        seconds: "{{ recovery_wait }}"
+        seconds: "{{ recovery_wait }}"  # 지정된 시간 대기
 
-    - name: Get final deployment status
+    - name: Get final deployment status  # 최종 배포 상태 확인
       ansible.builtin.shell: |
         kubectl get deployments -n {{ target_namespace }} \
           -o custom-columns="NAME:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas" --no-headers
-      register: final_status
-      ignore_errors: yes
-      changed_when: false
+      register: final_status  # 결과 저장
+      ignore_errors: yes  # 오류 무시
+      changed_when: false  # 변경 없음
 
-    - name: Show final deployment summary
+    - name: Show final deployment summary  # 최종 상태 요약 출력
       ansible.builtin.debug:
         msg: |
           ✅ 최종 복구 상태
-          {{ final_status.stdout | default('정보 없음') }}
+          {{ final_status.stdout | default('정보 없음') }}  # 최종 출력
 
     # ─────────────────────────────────────────────
     # 8️⃣ 로그 기록 및 요약
     # ─────────────────────────────────────────────
-    - name: Write recovery summary to log
+    - name: Write recovery summary to log  # 복구 결과 로그 기록
       ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
-        create: yes
+        path: "{{ chaos_log_path | default('/tmp/chaos_test.log') }}"  # 로그 경로 (fallback 포함)
+        create: yes  # 파일 없으면 생성
         line: |
-          [{{ ansible_date_time.iso8601 }}] Recovery ns={{ target_namespace }} result="{{ final_status.stdout | replace('\n','; ') }}"
-      become: yes
+          [{{ ansible_date_time.iso8601 }}] Recovery ns={{ target_namespace }} result="{{ final_status.stdout | replace('\n','; ') }}"  # 로그 작성
+      become: yes  # 루트 권한 필요
 
-    - name: ✅ Final recovery summary
+    - name: Final recovery summary  # 최종 요약 출력
       ansible.builtin.debug:
         msg: |
-          ✅ Chaos Recovery Completed Successfully
-          - Namespace: {{ target_namespace }}
-          - Recovered Services: {{ recovery_targets | join(', ') }}
+          ✅ Chaos Recovery Completed Successfully  # 완료 메시지
+          - Namespace: {{ target_namespace }}  # 네임스페이스 표시
+          - Recovered Services: {{ recovery_targets | join(', ') }}  # 복구 대상 표시
           - Final Status:
-          {{ final_status.stdout | default('정보 없음') }}
+          {{ final_status.stdout | default('정보 없음') }}  # 상태 출력
