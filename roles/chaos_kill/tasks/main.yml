@@ -12,7 +12,7 @@
     that:
       - target_namespace == "app"
     fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos 테스트는 app namespace 내에서만 허용됩니다."
-    success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
+    success_msg: "✅ namespace 확인 완료 ('app')"
 
 # ─────────────────────────────────────────────
 # Step 1️⃣: Resolve target services dynamically
