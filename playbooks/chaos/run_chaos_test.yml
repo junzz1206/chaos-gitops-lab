@@ -1,109 +1,132 @@
 # ─────────────────────────────────────────────
-# playbooks/chaos/run_chaos_test.yml
+# 파일명: playbooks/chaos/run_chaos_test.yml  # 파일 경로
 # 목적:
 #   - Pod, Network, CPU, Service Chaos 병렬 실행 (각 100초)
 #   - internal / external 모드 모두 지원
 #   - 복구 단계 제외 (Chaos만 수행)
 #   - CI/CD (ArgoCD, GitLab 등) 환경에서 즉시 중단 가능
+#   - 표준 변수명 및 로그 포맷 통일
 # ─────────────────────────────────────────────
 
-- name: Execute Full Chaos Workflow (Parallel, CI/CD-safe)
-  hosts: k3s_master
-  become: yes
-  strategy: free
-  vars:
-    target_namespace: "app"
-    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(100, true) | int }}"
-    chaos_mode: "{{ lookup('env','CHAOS_MODE') | default('internal', true) }}"
-    network_delay_ms: 300
-    chaos_log_path: "/var/log/chaos_test.log"
+- name: Execute Full Chaos Workflow (Parallel, CI/CD-safe)  # 메인 플레이 이름
+  hosts: k3s_master  # 마스터 노드 타겟
+  become: yes  # 루트 권한으로 실행
+  strategy: free  # 병렬 실행 허용
 
-  tasks:
-    # Step 1️⃣: 시작 로그
-    - name: Announce chaos workflow start
+  vars:  # 주요 변수 정의
+    target_namespace: "app"  # Chaos 대상 네임스페이스
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(100, true) | int }}"  # Chaos 유지 시간 (초)
+    chaos_mode: "{{ lookup('env','CHAOS_MODE') | default('internal', true) }}"  # internal/external 모드
+    network_delay_ms: 300  # 네트워크 지연 시간 (ms)
+    chaos_log_path: "{{ lookup('env','CHAOS_LOG_PATH') | default('/var/log/chaos_test.log', true) }}"  # Chaos 로그 경로
+
+  tasks:  # 작업 목록 시작
+
+    # Step 1️⃣: Chaos 테스트 시작 알림
+    - name: Announce chaos workflow start  # 시작 단계 안내
       ansible.builtin.debug:
-        msg: |
-          🚀 Chaos 병렬 테스트 시작
-          - namespace: {{ target_namespace }}
-          - duration: {{ chaos_duration }}초
-          - mode: {{ chaos_mode }}
-          - recovery: 비활성화됨 (자동 복구 없음)
+        msg: |  # 멀티라인 메시지
+          === Chaos 병렬 테스트 시작 ===
+          - Namespace: {{ target_namespace }}
+          - Duration: {{ chaos_duration }}초
+          - Mode: {{ chaos_mode }}
+          - Recovery 단계: 비활성화됨 (자동 복구 없음)
 
-    # Step 2️⃣: 병렬 Chaos 주입 (async → CI/CD cancel 시 즉시 중지)
-    - name: Launch Pod Kill Chaos
-      ansible.builtin.shell: >
+    # Step 2️⃣: 병렬 Chaos 주입 (async → cancel-safe)
+    - name: Launch Pod Kill Chaos  # Pod Kill Chaos 실행
+      ansible.builtin.shell: >  # 셸 명령 실행
         ansible-playbook {{ playbook_dir }}/run_pod_kill.yml
         -e "chaos_duration={{ chaos_duration }}"
         -e "external_mode={{ chaos_mode }}"
         -e "target_namespace={{ target_namespace }}"
-      async: "{{ chaos_duration + 30 }}"
-      poll: 0
-      register: pod_job
-      ignore_errors: yes
+        --forks 1
+      async: "{{ chaos_duration + 30 }}"  # 비동기 실행 (duration+30초 타임아웃)
+      poll: 0  # 백그라운드 실행
+      register: pod_job  # 작업 ID 저장
+      ignore_errors: yes  # 오류 무시
 
-    - name: Launch Network Chaos
+    - name: Launch Network Chaos  # 네트워크 Chaos 실행
       ansible.builtin.shell: >
         ansible-playbook {{ playbook_dir }}/run_network_chaos.yml
         -e "chaos_duration={{ chaos_duration }}"
         -e "net_mode={{ chaos_mode }}"
+        -e "network_delay_ms={{ network_delay_ms }}"
         -e "target_namespace={{ target_namespace }}"
+        --forks 1
       async: "{{ chaos_duration + 30 }}"
       poll: 0
       register: net_job
       ignore_errors: yes
 
-    - name: Launch CPU Stress Chaos
+    - name: Launch CPU Stress Chaos  # CPU 부하 Chaos 실행
       ansible.builtin.shell: >
         ansible-playbook {{ playbook_dir }}/run_cpu_stress.yml
         -e "chaos_duration={{ chaos_duration }}"
         -e "stress_mode={{ chaos_mode }}"
         -e "target_namespace={{ target_namespace }}"
+        --forks 1
       async: "{{ chaos_duration + 30 }}"
       poll: 0
       register: cpu_job
       ignore_errors: yes
 
-    - name: Launch Service Kill Chaos
+    - name: Launch Service Kill Chaos  # Service Kill Chaos 실행
       ansible.builtin.shell: >
         ansible-playbook {{ playbook_dir }}/run_service_kill.yml
         -e "chaos_duration={{ chaos_duration }}"
         -e "mode={{ chaos_mode }}"
         -e "target_namespace={{ target_namespace }}"
+        --forks 1
       async: "{{ chaos_duration + 30 }}"
       poll: 0
       register: svc_job
       ignore_errors: yes
 
-    # Step 3️⃣: CI/CD 환경 대응 대기 (취소 신호 감지 시 즉시 종료)
-    - name: Wait for chaos duration (cancel-safe)
-      block:
-        - ansible.builtin.pause:
-            seconds: "{{ chaos_duration }}"
-      rescue:
-        - name: Handle CI/CD manual cancellation
+    # Step 3️⃣: CI/CD 취소 신호 감지 블록
+    - name: Wait for chaos duration (cancel-safe)  # Chaos 유지 대기
+      block:  # 메인 블록
+        - ansible.builtin.pause:  # 단순 대기
+            seconds: "{{ chaos_duration }}"  # 지정된 Chaos 유지 시간 동안 대기
+      rescue:  # CI/CD 수동 취소 감지 시
+        - name: Handle CI/CD manual cancellation  # 중단 로그
           ansible.builtin.debug:
-            msg: "🛑 CI/CD 취소 감지됨. Chaos 실험 중단 및 정리 중..."
-        - ansible.builtin.shell: |
-            pkill -f "ansible-playbook.*run_.*_chaos.yml" || true
-          ignore_errors: yes
-        - ansible.builtin.debug:
-            msg: "✅ 모든 하위 Chaos 프로세스 종료 완료"
+            msg: "🛑 CI/CD 중단 감지됨 — Chaos 테스트를 안전하게 종료합니다."
 
-    # Step 4️⃣: Chaos 완료 로그
-    - name: Write chaos workflow completion log
+        - name: Kill background chaos processes  # 백그라운드 ansible-playbook 종료
+          ansible.builtin.shell: |
+            pkill -f "ansible-playbook.*run_(pod|cpu|network|service)_chaos.yml" || true  # 해당 chaos 플레이북만 종료
+          ignore_errors: yes  # 오류 무시
+
+        - name: Log CI/CD stop event  # 중단 로그 파일에 기록
+          ansible.builtin.lineinfile:
+            path: "{{ chaos_log_path | default('/tmp/chaos_test.log') }}"  # 접근 불가 대비 /tmp fallback
+            create: yes
+            line: "[{{ ansible_date_time.iso8601 }}] ChaosTest Aborted (manual cancel detected)"
+          become: yes
+          failed_when: false  # rescue 내 오류 방지
+
+        - name: Announce chaos termination complete  # 중단 완료 안내
+          ansible.builtin.debug:
+            msg: "✅ 모든 Chaos 프로세스 종료 완료"
+
+        - ansible.builtin.meta: end_play  # 이후 task 중단 (CI/CD-safe 종료)
+
+    # Step 4️⃣: Chaos 완료 로그 기록
+    - name: Write chaos workflow completion log  # Chaos 완료 로그 작성
       ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
-        create: yes
+        path: "{{ chaos_log_path | default('/tmp/chaos_test.log') }}"  # 기본 경로 + fallback
+        create: yes  # 파일 없으면 생성
         line: |
           [{{ ansible_date_time.iso8601 }}] ChaosTest Completed (mode={{ chaos_mode }}, duration={{ chaos_duration }}s)
-      become: true
+      become: true  # 루트 권한으로 기록
+      ignore_errors: yes  # 권한 문제 발생 시 무시
 
-    - name: Display chaos completion summary
+    # Step 5️⃣: Chaos 실행 완료 요약 출력
+    - name: Display chaos completion summary  # 실행 요약
       ansible.builtin.debug:
-        msg: |
+        msg: |  # 멀티라인 메시지
           ✅ Chaos Workflow Completed
-          - namespace: {{ target_namespace }}
-          - mode: {{ chaos_mode }}
-          - duration: {{ chaos_duration }}초
-          - 복구 단계: 제외됨
-
+          - Namespace: {{ target_namespace }}
+          - Mode: {{ chaos_mode }}
+          - Duration: {{ chaos_duration }}초
+          - Recovery 단계: 제외됨
