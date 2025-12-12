@@ -1,191 +1,195 @@
 # ─────────────────────────────────────────────
-# 파일: roles/chaos_pod/tasks/main.yml
-# 목적:
-#   - internal: Ansible 또는 CI/CD에서 직접 Pod 삭제
-#   - external: 별도 chaos pod이 kubectl delete 실행
-#   - internal 실패 시 자동 fallback
-#   - Ansible 실행 시 pod_kill_targets.yml 사용
-#   - CI/CD 실행 시 환경변수 TARGET_PODS로 서비스 지정
+# 파일: roles/chaos_pod/tasks/main.yml  # 파일 경로
+# 목적:  # 파일의 역할 요약
+#   - internal: Ansible 또는 CI/CD에서 직접 Pod 삭제  # 내부 모드
+#   - external: 별도 chaos pod이 kubectl delete 실행  # 외부 모드
+#   - internal 실패 시 자동 fallback  # 실패 시 자동 전환
+#   - Ansible 실행 시 pod_kill_targets.yml 사용  # Ansible 기반 지정
+#   - CI/CD 실행 시 환경변수 TARGET_PODS로 서비스 지정  # CI/CD 기반 지정
 # ─────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
 # 0️⃣ Safety Checks
 # ─────────────────────────────────────────────
-- name: Validate namespace
-  ansible.builtin.assert:
-    that:
-      - target_namespace == "app"
-    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행해야 합니다."
-    success_msg: "✅ namespace 확인 완료"
+- name: Validate namespace  # 안전성 검증
+  ansible.builtin.assert:  # assert 모듈 사용
+    that:  # 검증 조건
+      - target_namespace == "app"  # 반드시 app 네임스페이스 내에서만 허용
+    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행해야 합니다."  # 실패 메시지
+    success_msg: "✅ namespace 확인 완료"  # 성공 메시지
 
 # ─────────────────────────────────────────────
 # 1️⃣ 환경변수 및 기본값 초기화
 # ─────────────────────────────────────────────
-- name: Initialize chaos configuration
-  ansible.builtin.set_fact:
-    chaos_log_path_final: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"
-    chaos_duration_safe: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default(15), true) }}"
-    random_pod_kill_count_safe: "{{ lookup('env','RANDOM_POD_KILL_COUNT') | default(random_pod_kill_count | default(2), true) }}"
-    kill_mode: "{{ lookup('env','KILL_MODE') | default(kill_mode | default('internal'), true) }}"
-    env_target_pods: "{{ lookup('env','TARGET_PODS') | default('', true) }}"
-  changed_when: false
+- name: Initialize chaos configuration  # Chaos 실행 환경 구성
+  ansible.builtin.set_fact:  # 변수 설정
+    chaos_log_path_final: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"  # 로그 파일 경로
+    chaos_duration_safe: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default(15), true) }}"  # Chaos 유지 시간
+    random_pod_kill_count_safe: "{{ lookup('env','RANDOM_POD_KILL_COUNT') | default(random_pod_kill_count | default(2), true) }}"  # 무작위 kill 개수
+    kill_mode: "{{ lookup('env','KILL_MODE') | default(kill_mode | default('internal'), true) }}"  # 실행 모드 (internal/external)
+    env_target_pods: "{{ lookup('env','TARGET_PODS') | default('', true) }}"  # CI/CD 환경 변수 기반 타겟
+  changed_when: false  # 단순 변수 설정 → 변경 아님
 
-- name: Show configuration summary
-  ansible.builtin.debug:
-    msg: |
+- name: Show configuration summary  # 설정값 출력
+  ansible.builtin.debug:  # debug 모듈 사용
+    msg: |  # 멀티라인 메시지 출력
       ⚙️ Pod Kill Chaos Configuration
-      - Mode: {{ kill_mode }}
-      - Duration: {{ chaos_duration_safe }}s
-      - Namespace: {{ target_namespace }}
-      - ENV Target Pods: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}
+      - Mode: {{ kill_mode }}  # 실행 모드 표시
+      - Duration: {{ chaos_duration_safe }}s  # 지속 시간 표시
+      - Namespace: {{ target_namespace }}  # 네임스페이스 표시
+      - ENV Target Pods: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}  # 환경변수로 지정된 타겟 표시
 
 # ─────────────────────────────────────────────
 # 2️⃣ 타겟 Pod 해석 (internal + external 분기)
 # ─────────────────────────────────────────────
-- name: Resolve target pods (Ansible vs CI/CD)
-  block:
-    # ───── Internal 모드: 기존 로직 유지 ─────
-    - name: Load from ENV or pod_kill_targets.yml (internal)
-      when: kill_mode == "internal"
-      block:
-        - name: Load from ENV
-          when: env_target_pods | length > 0
-          ansible.builtin.set_fact:
-            target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"
-          changed_when: false
+- name: Resolve target pods (Ansible vs CI/CD)  # 타겟 Pod 계산 블록
+  block:  # 다중 조건 처리
+    # ───── Internal 모드 ─────
+    - name: Load from ENV or pod_kill_targets.yml (internal)  # internal일 때 타겟 로드
+      when: kill_mode == "internal"  # internal 모드 조건
+      block:  # 내부 블록
+        - name: Load from ENV  # 환경변수에서 불러오기
+          when: env_target_pods | length > 0  # TARGET_PODS 존재 시
+          ansible.builtin.set_fact:  # 변수 설정
+            target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"  # 쉼표 구분 → 리스트 변환
+          changed_when: false  # 단순 설정
 
-        - name: Load from pod_kill_targets.yml (fallback)
-          when:
-            - (target_pod_names is not defined or target_pod_names | length == 0)
-            - lookup('file', '{{ playbook_dir }}/../../pod_kill_targets.yml', errors='ignore') is not none
-          ansible.builtin.include_vars:
-            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
-            name: pod_targets_fallback
+        - name: Load from pod_kill_targets.yml (fallback)  # 파일 기반 fallback
+          when:  # 조건 정의
+            - (target_pod_names is not defined or target_pod_names | length == 0)  # ENV 미정의
+            - lookup('file', '{{ playbook_dir }}/../../pod_kill_targets.yml', errors='ignore') is not none  # 파일 존재 확인
+          ansible.builtin.include_vars:  # 변수 포함
+            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"  # 대상 파일 경로
+            name: pod_targets_fallback  # 로드된 변수 네임스페이스 지정
 
-        - name: Apply fallback list
-          when:
-            - target_pod_names is not defined or target_pod_names | length == 0
-            - pod_targets_fallback is defined and pod_targets_fallback.pod_targets is defined
-          ansible.builtin.set_fact:
-            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
-          changed_when: false
+        - name: Apply fallback list  # fallback 값 적용
+          when:  # 조건
+            - target_pod_names is not defined or target_pod_names | length == 0  # ENV 미정의
+            - pod_targets_fallback is defined and pod_targets_fallback.pod_targets is defined  # fallback 값 존재
+          ansible.builtin.set_fact:  # 변수 적용
+            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"  # fallback 적용
+          changed_when: false  # 변경 아님
 
-        - name: Debug targets (internal)
-          ansible.builtin.debug:
-            msg: |
+        - name: Debug targets (internal)  # internal 타겟 출력
+          ansible.builtin.debug:  # debug 출력
+            msg: |  # 멀티라인
               🎯 Internal Pod Kill Targets
-              - From ENV: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}
-              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
-              - Effective: {{ target_pod_names | default([]) }}
+              - From ENV: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}  # ENV
+              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}  # 파일
+              - Effective: {{ target_pod_names | default([]) }}  # 최종 결과
 
-    # ───── External 모드: CI/CD vs Ansible 분리 ─────
-    - name: Determine external targets (CI/CD)
-      when: kill_mode == "external" and env_target_pods | length > 0
-      ansible.builtin.set_fact:
-        target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"
-      changed_when: false
+    # ───── External 모드 ─────
+    - name: Determine external targets (CI/CD)  # CI/CD 환경 external 처리
+      when: kill_mode == "external" and env_target_pods | length > 0  # external + ENV 존재
+      ansible.builtin.set_fact:  # 변수 설정
+        target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"  # 쉼표 구분 처리
+      changed_when: false  # 변경 아님
 
-    - name: Determine external targets (Ansible local)
-      when: kill_mode == "external" and env_target_pods | length == 0
-      block:
-        - name: Include pod_kill_targets.yml (Ansible fallback)
-          ansible.builtin.include_vars:
-            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
-            name: pod_targets_fallback
-        - name: Set external targets from file
-          ansible.builtin.set_fact:
-            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
-          changed_when: false
-        - name: Debug targets (external local)
-          ansible.builtin.debug:
-            msg: |
+    - name: Determine external targets (Ansible local)  # Ansible 실행 시 external 처리
+      when: kill_mode == "external" and env_target_pods | length == 0  # external + ENV 없음
+      block:  # 파일 기반 처리
+        - name: Include pod_kill_targets.yml (Ansible fallback)  # fallback 로드
+          ansible.builtin.include_vars:  # include_vars 사용
+            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"  # 파일 경로
+            name: pod_targets_fallback  # 네임 지정
+        - name: Set external targets from file  # 변수 설정
+          ansible.builtin.set_fact:  # set_fact 사용
+            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"  # fallback 적용
+          changed_when: false  # 변경 아님
+        - name: Debug targets (external local)  # 결과 출력
+          ansible.builtin.debug:  # debug 모듈
+            msg: |  # 멀티라인
               🎯 External Pod Kill Targets (Ansible)
-              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
+              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}  # 파일에서 읽은 목록
 
 # ─────────────────────────────────────────────
 # 3️⃣ Disable auto-recovery (선택적)
 # ─────────────────────────────────────────────
-- name: Disable ReplicaSets if requested
-  when: disable_autorecover | default(false)
-  ansible.builtin.shell: |
-    echo "[INFO] Disabling ReplicaSets..."
-    kubectl get rs -n {{ target_namespace }} -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0
-  ignore_errors: yes
+- name: Disable ReplicaSets if requested  # auto-recovery 차단
+  when: disable_autorecover | default(false)  # 조건이 true일 경우만 실행
+  ansible.builtin.shell: |  # 셸 명령 실행
+    echo "[INFO] Disabling ReplicaSets..."  # 로그 출력
+    kubectl get rs -n {{ target_namespace }} -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0  # ReplicaSet 0으로 축소
+  ignore_errors: yes  # 오류 무시
 
 # ─────────────────────────────────────────────
 # 4️⃣ Internal Pod Kill
 # ─────────────────────────────────────────────
-- name: Kill pods directly (internal)
-  when: kill_mode == "internal"
-  ansible.builtin.shell: |
-    if [ "{{ target_pod_names | default('') }}" != "" ]; then
-      PODS="{{ target_pod_names | join(' ') }}"
-    else
-      PODS=$(kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name | shuf -n {{ random_pod_kill_count_safe }})
+- name: Kill pods directly (internal)  # 내부 모드에서 직접 삭제
+  when: kill_mode == "internal"  # internal 모드 조건
+  ansible.builtin.shell: |  # 셸 실행
+    if [ "{{ target_pod_names | default('') }}" != "" ]; then  # 타겟이 정의된 경우
+      PODS="{{ target_pod_names | join(' ') }}"  # 직접 사용
+    else  # 정의되지 않았을 경우
+      PODS=$(kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name | shuf -n {{ random_pod_kill_count_safe }})  # 무작위 Pod 선택
     fi
-    echo "[INFO] Deleting pods: $PODS"
-    for p in $PODS; do
-      kubectl delete "$p" -n {{ target_namespace }} --grace-period=0 --force || echo "[WARN] Failed to delete $p"
+    echo "[INFO] Deleting pods: $PODS"  # 로그 출력
+    for p in $PODS; do  # 각 Pod 반복 삭제
+      kubectl delete "$p" -n {{ target_namespace }} --grace-period=0 --force || echo "[WARN] Failed to delete $p"  # 강제 삭제
     done
-  register: internal_kill_result
-  ignore_errors: yes
-  changed_when: true
+  register: internal_kill_result  # 결과 저장
+  ignore_errors: yes  # 오류 무시
+  changed_when: true  # 변경 감지
 
 # ─────────────────────────────────────────────
 # 5️⃣ Fallback — internal 실패 시 external 전환
 # ─────────────────────────────────────────────
-- name: Switch to external if internal fails
-  when: kill_mode == "internal" and internal_kill_result.rc != 0
-  ansible.builtin.set_fact:
-    kill_mode: "external"
-  changed_when: true
+- name: Switch to external if internal fails  # internal 실패 시 external 모드로 전환
+  when: kill_mode == "internal" and internal_kill_result.rc != 0  # 실패 조건
+  ansible.builtin.set_fact:  # 변수 변경
+    kill_mode: "external"  # external 전환
+  changed_when: true  # 변경 표시
 
 # ─────────────────────────────────────────────
 # 6️⃣ External Mode — helper pod을 통한 삭제
 # ─────────────────────────────────────────────
-- name: Execute external pod kill per service
-  when: kill_mode == "external"
-  ansible.builtin.shell: |
-    for svc in {{ target_pod_names | join(' ') }}; do
-      echo "[EXTERNAL] Launching chaos pod for $svc..."
-      kubectl run chaos-podkill-$svc \
-        --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \
-        --overrides='{
+- name: Execute external pod kill per service  # external pod 생성 및 삭제 수행
+  when: kill_mode == "external"  # external 모드일 때만 실행
+  ansible.builtin.shell: |  # 셸 실행
+    for svc in {{ target_pod_names | join(' ') }}; do  # 각 서비스 반복
+      echo "[EXTERNAL] Launching chaos pod for $svc..."  # 실행 로그 출력
+      SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-6)  # 6자리 UUID 생성 (중복 방지)
+      kubectl run chaos-podkill-$svc-$SUFFIX \  # Pod 이름에 접미사 추가
+        --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \  # 네임스페이스 지정
+        --overrides='{  # Pod 스펙 오버라이드 시작
           "spec": {
-            "containers": [{
-              "name": "podkill",
-              "image": "nicolaka/netshoot:latest",
-              "command": ["/bin/sh","-c"],
-              "args": [
-                "echo \"[CHAOS] Deleting pod(s) for $svc ...\"; \
-                 kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force; \
-                 sleep {{ chaos_duration_safe }}; \
-                 echo \"[DONE] Chaos complete for $svc.\";"
-              ]
-            }]
-          }
-        }' || true
-    done
-  register: external_result
-  ignore_errors: yes
-  changed_when: true
+            "containers": [{  # 컨테이너 배열
+              "name": "podkill",  # 컨테이너 이름
+              "image": "nicolaka/netshoot:latest",  # 이미지 지정
+              "command": ["/bin/sh","-c"],  # 커맨드 실행
+              "args": [  # 실행 인자
+                "set -eux; \  # 오류 시 중단 + verbose 출력
+                 echo \"[CHAOS] Deleting pod(s) for $svc ...\"; \  # 시작 로그
+                 kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true; \  # 실제 삭제
+                 sleep {{ chaos_duration_safe }}; \  # Chaos 유지
+                 echo \"[RECOVERY] Chaos complete for $svc.\"; \  # 완료 로그
+                 kubectl delete pod $(hostname) -n {{ target_namespace }} --force --grace-period=0 || true;"  # 자기 자신 pod 삭제
+              ]  # args 종료
+            }]  # containers 종료
+          }  # spec 종료
+        }' || true  # 실패 무시
+    done  # for문 종료
+  register: external_result  # 실행 결과 저장
+  ignore_errors: yes  # 오류 무시
+  changed_when: true  # 변경 감지
 
 # ─────────────────────────────────────────────
 # 7️⃣ 로그 기록 및 종료
 # ─────────────────────────────────────────────
-- name: Append chaos result to log
-  ansible.builtin.lineinfile:
-    path: "{{ chaos_log_path_final }}"
-    create: yes
-    line: |
+- name: Append chaos result to log  # Chaos 결과 로그 추가
+  ansible.builtin.lineinfile:  # lineinfile 모듈 사용
+    path: "{{ chaos_log_path_final }}"  # 로그 경로
+    create: yes  # 파일 없으면 생성
+    line: |  # 로그 한 줄 작성
       [{{ ansible_date_time.iso8601 }}] PodChaos ns={{ target_namespace }} mode={{ kill_mode }} targets={{ target_pod_names | join(',') }} duration={{ chaos_duration_safe }}s
-  become: true
+  become: true  # 루트 권한으로 기록
 
-- name: Final message
-  ansible.builtin.debug:
-    msg: |
+- name: Final message  # 최종 결과 출력
+  ansible.builtin.debug:  # debug 모듈 사용
+    msg: |  # 멀티라인 출력
       ✅ Pod Chaos Completed
-      - Mode: {{ kill_mode }}
-      - Targets: {{ target_pod_names | join(', ') }}
-      - Duration: {{ chaos_duration_safe }}s
-      - Log: {{ chaos_log_path_final }}
+      - Mode: {{ kill_mode }}  # 실행 모드 표시
+      - Targets: {{ target_pod_names | join(', ') }}  # 대상 목록 표시
+      - Duration: {{ chaos_duration_safe }}s  # 지속 시간 표시
+      - Log: {{ chaos_log_path_final }}  # 로그 경로 표시
+
