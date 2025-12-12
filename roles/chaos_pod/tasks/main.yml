@@ -1,188 +1,191 @@
+# ─────────────────────────────────────────────
+# 파일: roles/chaos_pod/tasks/main.yml
 # 목적:
-#   - 네임스페이스 내 특정 또는 무작위 Pod 삭제 (라벨 기반)
-#   - disable_autorecover=true 시 ReplicaSet 자동복구 차단
-#   - chaos_log_path_final에 결과 기록
+#   - internal: Ansible 또는 CI/CD에서 직접 Pod 삭제
+#   - external: 별도 chaos pod이 kubectl delete 실행
+#   - internal 실패 시 자동 fallback
+#   - Ansible 실행 시 pod_kill_targets.yml 사용
+#   - CI/CD 실행 시 환경변수 TARGET_PODS로 서비스 지정
 # ─────────────────────────────────────────────
 
-# Step 0️⃣: Safety Checks
-- name: "Safety Check - ensure target_namespace variable exists"
+# ─────────────────────────────────────────────
+# 0️⃣ Safety Checks
+# ─────────────────────────────────────────────
+- name: Validate namespace
   ansible.builtin.assert:
     that:
-      - target_namespace is defined
-    fail_msg: "❌ target_namespace 변수가 정의되어 있지 않습니다. 예: -e 'target_namespace=app'"
-    success_msg: "✅ target_namespace 변수 확인됨: {{ target_namespace }}"
+      - target_namespace == "app"
+    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행해야 합니다."
+    success_msg: "✅ namespace 확인 완료"
 
-- name: "Safety Check - ensure running in test namespace 'app' by default"
-  ansible.builtin.assert:
-    that:
-      - (target_namespace | default('app')) == "app"
-    fail_msg: "⚠️ 안전장치: target_namespace가 'app'이 아닙니다. Chaos 테스트 전 확인 필요."
-    success_msg: "✅ namespace 안전검사 통과 ({{ target_namespace }})"
-
-# Step 1️⃣: Variable Initialization
-- name: "Set defaults for optional variables (safe defaults)"
+# ─────────────────────────────────────────────
+# 1️⃣ 환경변수 및 기본값 초기화
+# ─────────────────────────────────────────────
+- name: Initialize chaos configuration
   ansible.builtin.set_fact:
     chaos_log_path_final: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"
-    random_pod_kill_count_safe: "{{ (random_pod_kill_count | int) if (random_pod_kill_count is defined and (random_pod_kill_count | int) > 0) else 2 }}"
-    chaos_duration_safe: "{{ (chaos_duration | int) if (chaos_duration is defined and (chaos_duration | int) > 0) else 10 }}"
+    chaos_duration_safe: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default(15), true) }}"
+    random_pod_kill_count_safe: "{{ lookup('env','RANDOM_POD_KILL_COUNT') | default(random_pod_kill_count | default(2), true) }}"
+    kill_mode: "{{ lookup('env','KILL_MODE') | default(kill_mode | default('internal'), true) }}"
+    env_target_pods: "{{ lookup('env','TARGET_PODS') | default('', true) }}"
   changed_when: false
 
-- name: "Display run parameters"
+- name: Show configuration summary
   ansible.builtin.debug:
     msg: |
-      🧨 Chaos Pod Kill 시작
-      - namespace: {{ target_namespace }}
-      - delete_count: {{ random_pod_kill_count_safe }}
-      - chaos_duration: {{ chaos_duration_safe }}초
-      - log_path: {{ chaos_log_path_final }}
-      - target_pod_names: {{ target_pod_names | join(', ') if (target_pod_names is defined and target_pod_names | length > 0) else '없음 (랜덤 대상)' }}
-      - disable_autorecover: {{ disable_autorecover | default(false) }}
+      ⚙️ Pod Kill Chaos Configuration
+      - Mode: {{ kill_mode }}
+      - Duration: {{ chaos_duration_safe }}s
+      - Namespace: {{ target_namespace }}
+      - ENV Target Pods: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}
 
-# Step 2️⃣: Disable auto-recover (optional)
-- name: "Find ReplicaSets in target namespace"
+# ─────────────────────────────────────────────
+# 2️⃣ 타겟 Pod 해석 (internal + external 분기)
+# ─────────────────────────────────────────────
+- name: Resolve target pods (Ansible vs CI/CD)
+  block:
+    # ───── Internal 모드: 기존 로직 유지 ─────
+    - name: Load from ENV or pod_kill_targets.yml (internal)
+      when: kill_mode == "internal"
+      block:
+        - name: Load from ENV
+          when: env_target_pods | length > 0
+          ansible.builtin.set_fact:
+            target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"
+          changed_when: false
+
+        - name: Load from pod_kill_targets.yml (fallback)
+          when:
+            - (target_pod_names is not defined or target_pod_names | length == 0)
+            - lookup('file', '{{ playbook_dir }}/../../pod_kill_targets.yml', errors='ignore') is not none
+          ansible.builtin.include_vars:
+            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
+            name: pod_targets_fallback
+
+        - name: Apply fallback list
+          when:
+            - target_pod_names is not defined or target_pod_names | length == 0
+            - pod_targets_fallback is defined and pod_targets_fallback.pod_targets is defined
+          ansible.builtin.set_fact:
+            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
+          changed_when: false
+
+        - name: Debug targets (internal)
+          ansible.builtin.debug:
+            msg: |
+              🎯 Internal Pod Kill Targets
+              - From ENV: {{ env_target_pods if env_target_pods|length > 0 else 'N/A' }}
+              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
+              - Effective: {{ target_pod_names | default([]) }}
+
+    # ───── External 모드: CI/CD vs Ansible 분리 ─────
+    - name: Determine external targets (CI/CD)
+      when: kill_mode == "external" and env_target_pods | length > 0
+      ansible.builtin.set_fact:
+        target_pod_names: "{{ env_target_pods.split(',') | map('trim') | list }}"
+      changed_when: false
+
+    - name: Determine external targets (Ansible local)
+      when: kill_mode == "external" and env_target_pods | length == 0
+      block:
+        - name: Include pod_kill_targets.yml (Ansible fallback)
+          ansible.builtin.include_vars:
+            file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
+            name: pod_targets_fallback
+        - name: Set external targets from file
+          ansible.builtin.set_fact:
+            target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
+          changed_when: false
+        - name: Debug targets (external local)
+          ansible.builtin.debug:
+            msg: |
+              🎯 External Pod Kill Targets (Ansible)
+              - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
+
+# ─────────────────────────────────────────────
+# 3️⃣ Disable auto-recovery (선택적)
+# ─────────────────────────────────────────────
+- name: Disable ReplicaSets if requested
   when: disable_autorecover | default(false)
   ansible.builtin.shell: |
-    kubectl get rs -n {{ target_namespace }} -o jsonpath='{.items[*].metadata.name}'
-  register: rs_list_raw
-  changed_when: false
+    echo "[INFO] Disabling ReplicaSets..."
+    kubectl get rs -n {{ target_namespace }} -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0
+  ignore_errors: yes
 
-- name: "Scale down all ReplicaSets to disable auto recovery"
-  when: disable_autorecover | default(false)
+# ─────────────────────────────────────────────
+# 4️⃣ Internal Pod Kill
+# ─────────────────────────────────────────────
+- name: Kill pods directly (internal)
+  when: kill_mode == "internal"
   ansible.builtin.shell: |
-    for rs in {{ rs_list_raw.stdout }}; do
-      echo "Scaling down ReplicaSet: $rs"
-      kubectl scale rs "$rs" -n {{ target_namespace }} --replicas=0 || true
+    if [ "{{ target_pod_names | default('') }}" != "" ]; then
+      PODS="{{ target_pod_names | join(' ') }}"
+    else
+      PODS=$(kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name | shuf -n {{ random_pod_kill_count_safe }})
+    fi
+    echo "[INFO] Deleting pods: $PODS"
+    for p in $PODS; do
+      kubectl delete "$p" -n {{ target_namespace }} --grace-period=0 --force || echo "[WARN] Failed to delete $p"
     done
+  register: internal_kill_result
   ignore_errors: yes
   changed_when: true
 
-# Step 3️⃣: Resolve actual pods dynamically by label
-- name: "Resolve real pod names from labels"
-  when: target_pod_names is defined and target_pod_names | length > 0
-  ansible.builtin.shell: |
-    kubectl get pods -n {{ target_namespace }} -l app={{ item }} -o jsonpath='{.items[*].metadata.name}'
-  loop: "{{ target_pod_names }}"
-  register: resolved_pods
-  changed_when: false
-
-- name: "Collect resolved pod names"
-  when: target_pod_names is defined and target_pod_names | length > 0
+# ─────────────────────────────────────────────
+# 5️⃣ Fallback — internal 실패 시 external 전환
+# ─────────────────────────────────────────────
+- name: Switch to external if internal fails
+  when: kill_mode == "internal" and internal_kill_result.rc != 0
   ansible.builtin.set_fact:
-    selected_pods: "{{ resolved_pods.results | map(attribute='stdout') | map('split') | sum(start=[]) }}"
-  changed_when: false
+    kill_mode: "external"
+  changed_when: true
 
-# Step 4️⃣: If no specific targets, select random running pods
-- name: "Get running pods in namespace (random mode)"
-  when: target_pod_names is not defined or target_pod_names | length == 0
+# ─────────────────────────────────────────────
+# 6️⃣ External Mode — helper pod을 통한 삭제
+# ─────────────────────────────────────────────
+- name: Execute external pod kill per service
+  when: kill_mode == "external"
   ansible.builtin.shell: |
-    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running -o name --no-headers
-  register: all_pods
-  changed_when: false
-
-- name: "Select random pods for chaos"
-  when: target_pod_names is not defined or target_pod_names | length == 0
-  ansible.builtin.set_fact:
-    selected_pods: "{{ (all_pods.stdout_lines | shuffle)[: (random_pod_kill_count_safe | int)] }}"
-  changed_when: false
-
-- name: "Debug - show selected pods"
-  ansible.builtin.debug:
-    msg: "🗑️   삭제 대상 Pod: {{ selected_pods }}"
-
-# Step 5️⃣: Delete selected pods (forced)
-- name: "Delete selected pods (grace-period=0, force)"
-  ansible.builtin.shell: |
-    set -eux
-    for p in {{ selected_pods | join(' ') }}; do
-      echo "Deleting pod: $p"
-      kubectl delete pod "$p" -n {{ target_namespace }} --grace-period=0 --force || echo "❗ kubectl delete failed for $p"
+    for svc in {{ target_pod_names | join(' ') }}; do
+      echo "[EXTERNAL] Launching chaos pod for $svc..."
+      kubectl run chaos-podkill-$svc \
+        --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \
+        --overrides='{
+          "spec": {
+            "containers": [{
+              "name": "podkill",
+              "image": "nicolaka/netshoot:latest",
+              "command": ["/bin/sh","-c"],
+              "args": [
+                "echo \"[CHAOS] Deleting pod(s) for $svc ...\"; \
+                 kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force; \
+                 sleep {{ chaos_duration_safe }}; \
+                 echo \"[DONE] Chaos complete for $svc.\";"
+              ]
+            }]
+          }
+        }' || true
     done
-  register: kill_result
+  register: external_result
   ignore_errors: yes
   changed_when: true
 
-- name: "Write deletion stdout to debug"
-  ansible.builtin.debug:
-    var: kill_result.stdout_lines
-
-# Step 6️⃣: Wait for chaos_duration
-- name: "Pause to allow scheduler to react"
-  ansible.builtin.pause:
-    seconds: "{{ chaos_duration_safe }}"
-
-# Step 7️⃣: Verify state
-- name: "Check Running pods after chaos"
-  ansible.builtin.shell: |
-    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase=Running --no-headers | wc -l
-  register: recovery_count
-  changed_when: false
-
-- name: "Show running pod count after chaos"
-  ansible.builtin.debug:
-    msg: "📊 Post-chaos Running pod count: {{ recovery_count.stdout }}"
-
-# Step 8️⃣: Re-enable auto recovery
-- name: "Re-enable ReplicaSet auto recovery (scale up)"
-  when: disable_autorecover | default(false)
-  ansible.builtin.shell: |
-    for rs in {{ rs_list_raw.stdout }}; do
-      echo "Restoring ReplicaSet: $rs"
-      kubectl scale rs "$rs" -n {{ target_namespace }} --replicas=1 || true
-    done
-  ignore_errors: yes
-  changed_when: true
-
-# Step 9️⃣: Persist log
-- name: "Persist chaos result to log"
+# ─────────────────────────────────────────────
+# 7️⃣ 로그 기록 및 종료
+# ─────────────────────────────────────────────
+- name: Append chaos result to log
   ansible.builtin.lineinfile:
     path: "{{ chaos_log_path_final }}"
-    create: true
+    create: yes
     line: |
-      [{{ ansible_date_time.iso8601 }}] PodChaos: ns={{ target_namespace }} deleted={{ selected_pods | join(',') }} count={{ selected_pods | length }} running_after={{ recovery_count.stdout }}
+      [{{ ansible_date_time.iso8601 }}] PodChaos ns={{ target_namespace }} mode={{ kill_mode }} targets={{ target_pod_names | join(',') }} duration={{ chaos_duration_safe }}s
   become: true
-  when: recovery_count is defined
 
-# Step 🔟: Summary
-- name: "Final debug summary"
+- name: Final message
   ansible.builtin.debug:
     msg: |
-      ✅ Chaos Pod Kill 완료.
-      - namespace: {{ target_namespace }}
-      - deleted_pods: {{ selected_pods | join(', ') }}
-      - total_deleted: {{ selected_pods | length }}
-      - running_after: {{ recovery_count.stdout }}
-# Step 1.5️⃣: Dynamic Target Resolution (CI/CD 환경변수 or 파일)
-- name: "Resolve target pod names from environment variable or file"
-  vars:
-    env_target_pods: "{{ lookup('env', 'TARGET_PODS') | default('', true) }}"
-  block:
-    - name: "Load pod targets from CI/CD environment variable"
-      when: env_target_pods | length > 0
-      ansible.builtin.set_fact:
-        target_pod_names: "{{ env_target_pods.split(',') }}"
-      changed_when: false
-
-    - name: "Load pod targets from pod_kill_targets.yml (fallback)"
-      when:
-        - (target_pod_names is not defined or target_pod_names | length == 0)
-        - lookup('file', '{{ playbook_dir }}/../../pod_kill_targets.yml', errors='ignore') is not none
-      ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../../pod_kill_targets.yml"
-        name: pod_targets_fallback
-
-    - name: "Apply fallback target list from pod_kill_targets.yml"
-      when:
-        - target_pod_names is not defined or target_pod_names | length == 0
-        - pod_targets_fallback is defined and pod_targets_fallback.pod_targets is defined
-      ansible.builtin.set_fact:
-        target_pod_names: "{{ pod_targets_fallback.pod_targets }}"
-      changed_when: false
-
-    - name: "Show resolved pod targets (env or file)"
-      ansible.builtin.debug:
-        msg: |
-          🎯 Target pods resolved:
-          - From ENV: {{ env_target_pods if env_target_pods | length > 0 else 'N/A' }}
-          - From File: {{ pod_targets_fallback.pod_targets | default([]) }}
-          - Effective: {{ target_pod_names | default([]) }}
-
+      ✅ Pod Chaos Completed
+      - Mode: {{ kill_mode }}
+      - Targets: {{ target_pod_names | join(', ') }}
+      - Duration: {{ chaos_duration_safe }}s
+      - Log: {{ chaos_log_path_final }}
