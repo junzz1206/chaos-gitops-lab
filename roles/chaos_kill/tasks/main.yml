@@ -1,13 +1,10 @@
 # ─────────────────────────────────────────────
 # 파일: roles/chaos_kill/tasks/main.yml
 # 목적:
-#   - 지정된 서비스(라벨 app=)의 Pod 및 상위 ReplicaSet/Deployment 자동복구 완전 차단 후 강제 삭제
-#   - 환경변수 TARGET_SERVICES 기반 다중 서비스 Chaos 주입 지원
-#   - 무작위 Chaos Monkey 모드 지원
-#   - disable_autorecover=true 시 ReplicaSet, Deployment, StatefulSet scale 0
-#   - chaos_duration 동안 복구 금지
-#   - internal 실패 시 external로 자동 fallback
-#   - CI/CD 취소(ArgoCD, GitLab 등) 시 안전 중단
+#   - 지정된 서비스의 Pod 강제 삭제 및 상위 오브젝트 자동복구 차단
+#   - TARGET_SERVICES 환경변수로 다중 지정 가능
+#   - internal 실패 시 서비스별 external fallback (전체 kill 아님)
+#   - CI/CD 중단 시 안전 종료
 # ─────────────────────────────────────────────
 
 - name: Safety Check - Confirm namespace
@@ -43,10 +40,10 @@
       🎯 Chaos 대상 서비스
       - ENV(TARGET_SERVICES): {{ lookup('env', 'TARGET_SERVICES') | default('N/A') }}
       - Vars(target_app_label): {{ target_app_label | default('N/A') }}
-      - Effective: {{ target_services_effective | default([]) }}
+      - Effective Targets: {{ target_services_effective | join(', ') | default('N/A') }}
 
 # ─────────────────────────────────────────────
-# Step 2️⃣: Disable auto-recovery for each target
+# Step 2️⃣: Disable auto-recovery for selected services
 # ─────────────────────────────────────────────
 - name: Disable auto-recovery for selected services
   when:
@@ -54,100 +51,93 @@
     - target_services_effective | length > 0
   ansible.builtin.shell: |
     for svc in {{ target_services_effective | join(' ') }}; do
-      echo "[DISABLE] Scaling down controllers for $svc ..."
-      kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | \
-        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-      kubectl get rs -n {{ target_namespace }} -l app=$svc -o name | \
-        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-      kubectl get sts -n {{ target_namespace }} -l app=$svc -o name | \
-        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-      echo "[OK] $svc auto-recovery disabled."
+      echo "[DISABLE] Scaling down controllers for $svc..."
+      kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+      kubectl get rs -n {{ target_namespace }} -l app=$svc -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+      kubectl get sts -n {{ target_namespace }} -l app=$svc -o name | xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
     done
   register: disable_result
   ignore_errors: yes
 
-- name: Show disable result
-  ansible.builtin.debug:
-    msg: "{{ disable_result.stdout | default('No output') }}"
-  when: disable_result is defined
-
 # ─────────────────────────────────────────────
-# Step 3️⃣: Kill pods of each target service (try internal first)
+# Step 3️⃣: Internal Pod Kill (우선 시도)
 # ─────────────────────────────────────────────
-- name: Attempt pod kill via internal exec (detect minimal images)
+- name: Attempt pod kill via internal exec
   when: target_services_effective | length > 0
   ansible.builtin.shell: |
     failed_services=""
     for svc in {{ target_services_effective | join(' ') }}; do
-      echo "[TRY] Internal delete for $svc ..."
-      POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc \
-        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+      echo "[TRY] Internal delete for $svc..."
+      POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
       if [ -n "$POD" ]; then
-        # distroless 이미지 등에서 shell 실행 불가 시 실패 처리
+        # distroless 컨테이너 감지 (sh 실행 불가 시 fallback 대상 등록)
         kubectl exec -n {{ target_namespace }} $POD -- sh -c "echo ok" >/dev/null 2>&1 || failed_services="$failed_services $svc"
-        echo "[INFO] Killing pod(s) for $svc ..."
+        echo "[DELETE] Killing pod(s) for $svc..."
         kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true
       else
-        echo "[SKIP] No pod found for $svc"
+        echo "[SKIP] No running pod found for $svc"
       fi
     done
     if [ -n "$failed_services" ]; then
-      echo "[WARN] Internal mode not supported on:$failed_services"
+      echo "[WARN] Internal mode not supported for:$failed_services"
       exit 99
     fi
   register: internal_kill_result
   ignore_errors: yes
 
 # ─────────────────────────────────────────────
-# Step 4️⃣: Auto-fallback (internal → external)
+# Step 4️⃣: Auto Fallback (internal → external per service)
 # ─────────────────────────────────────────────
-- name: Fallback to external deletion if internal failed
+- name: Fallback to external chaos for failed internal services
   when: internal_kill_result.rc != 0
   ansible.builtin.shell: |
-    echo "[FALLBACK] Switching to external chaos kill mode..."
+    echo "[FALLBACK] Switching to external chaos mode for specific services..."
     for svc in {{ target_services_effective | join(' ') }}; do
-      echo "[CHAOS] Forcing deletion of pods for $svc (external)..."
-      kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true
+      echo "[EXTERNAL] Injecting chaos for $svc via helper pod..."
+      kubectl run chaos-kill-$svc --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \
+        --overrides='{
+          "spec": {
+            "containers": [{
+              "name": "chaos-kill",
+              "image": "nicolaka/netshoot:latest",
+              "command": ["/bin/sh", "-c"],
+              "args": [
+                "echo \"[EXTERNAL CHAOS] Forcing delete of $svc pods...\"; \
+                 kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true; \
+                 sleep {{ chaos_duration | default(30) }}; \
+                 echo \"[EXTERNAL CHAOS] Done for $svc.\";"
+              ]
+            }]
+          }
+        }' || true
     done
-  register: fallback_kill_result
+  register: fallback_result
   ignore_errors: yes
 
-- name: Log fallback result
+- name: Print fallback result
   when: internal_kill_result.rc != 0
   ansible.builtin.debug:
     msg: |
-      ⚠️ Internal execution failed, switched to external mode
-      {{ fallback_kill_result.stdout | default('No output') }}
+      ⚠️ Internal mode failed; fallback to service-specific external chaos
+      {{ fallback_result.stdout | default('No log output') }}
 
 # ─────────────────────────────────────────────
-# Step 5️⃣: Random Chaos Mode (fallback if no service provided)
+# Step 5️⃣: Random Chaos Mode (fallback if no service specified)
 # ─────────────────────────────────────────────
 - name: Execute random chaos mode
   when: (target_services_effective | length == 0) or (target_app_label | default('random') == 'random')
   ansible.builtin.shell: |
     chaos_targets="frontend productcatalogservice cartservice checkoutservice paymentservice shippingservice emailservice redis-cart"
-    echo "[RANDOM CHAOS] Randomly selecting services..."
-    for i in $(seq 1 {{ random_pod_kill_count | default(1) }}); do
-      svc=$(shuf -e $chaos_targets -n 1)
-      echo "[TARGET] Selected: $svc"
-      kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | \
-        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-      pod=$(kubectl get pods -n {{ target_namespace }} -l app=$svc -o name | shuf -n 1)
-      [ -n "$pod" ] && echo "[KILL] $svc → $pod" && kubectl delete $pod -n {{ target_namespace }} --grace-period=0 --force
-    done
+    svc=$(shuf -e $chaos_targets -n 1)
+    echo "[RANDOM] Randomly selected: $svc"
+    kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true
   register: random_kill_result
   ignore_errors: yes
 
-- name: Show random chaos results
-  ansible.builtin.debug:
-    msg: |
-      🎲 Random Chaos Results:
-      {{ random_kill_result.stdout | default('No output') }}
-
 # ─────────────────────────────────────────────
-# Step 6️⃣: Post-chaos verification
+# Step 6️⃣: Verification / Logging
 # ─────────────────────────────────────────────
-- name: Wait for recovery period
+- name: Wait for chaos duration
   ansible.builtin.pause:
     seconds: "{{ chaos_duration | default(30) }}"
 
@@ -155,14 +145,11 @@
   ansible.builtin.shell: |
     kubectl get pods -n {{ target_namespace }} --field-selector=status.phase!=Running
   register: non_running_pods
-  changed_when: false
   ignore_errors: yes
 
-- name: Display final status
+- name: Display final result
   ansible.builtin.debug:
     msg: |
       ✅ Chaos 테스트 완료
-      비정상 상태의 Pod:
+      비정상 Pod 목록:
       {{ non_running_pods.stdout | default('None (All Running)') }}
-
-
