@@ -128,4 +128,3 @@
           - Namespace: {{ target_namespace }}
           - Target Services: {{ target_app_labels }}
           - Note: 회복 및 복구는 restore_all.yml에서 수행됩니다.
-
