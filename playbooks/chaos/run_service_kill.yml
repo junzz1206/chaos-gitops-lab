@@ -1,185 +1,188 @@
 # ─────────────────────────────────────────────
 # 파일명: playbooks/chaos/run_service_kill.yml
 # 목적:
-#   - 여러 서비스(cart, payment, redis-cart 등)에 병렬 Chaos Kill 주입
-#   - Internal 실패 시 External 모드로 자동 전환
-#   - GitLab / ArgoCD 환경변수(TARGET_SERVICES) 기반 지정 가능
-#   - CLI에서는 vars.yml(service_targets) 기반 fallback
-#   - Deployment, ReplicaSet, StatefulSet 자동복구 완전 차단
-#   - wrapper 없이 async 병렬 실행
+#   - 여러 서비스(cart, payment, redis-cart 등)에 Chaos Kill 주입
+#   - Internal 실패 시 External 모드 자동 전환
+#   - GitLab / ArgoCD 환경변수 기반 지정 (TARGET_SERVICES)
+#   - CLI fallback: vars.yml(service_targets)
+#   - Deployment, RS, StatefulSet 복구 차단
 # ─────────────────────────────────────────────
 
-- name: 💥 Execute Targeted Service Kill Chaos (Internal / External Auto-Fallback)
-  hosts: k3s_master
-  become: yes
+- name: Execute Targeted Service Kill Chaos (Internal / External Auto-Fallback)  # 플레이북 이름 정의
+  hosts: k3s_master              # 이 플레이북을 실행할 대상 호스트 (K3s 마스터 노드)
+  become: yes                    # root 권한으로 실행
   vars:
-    target_namespace: "app"
-    chaos_log_path: "/var/log/chaos_test.log"
-    recovery_wait: "{{ lookup('env','RECOVERY_WAIT') | default(60, true) | int }}"
-    service_targets: []  # CLI fallback용
-    kill_mode: "{{ lookup('env','SERVICE_MODE') | default('internal', true) }}"  # internal / external
-    disable_autorecover: "{{ lookup('env','DISABLE_AUTORECOVER') | default(true, true) | bool }}"
-    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(30, true) | int }}"
+    target_namespace: "app"      # Chaos 테스트 대상 네임스페이스 지정
+    chaos_log_path: "/var/log/chaos_test.log"  # Chaos 실행 로그 경로 지정
+    recovery_wait: "{{ lookup('env','RECOVERY_WAIT') | default(60, true) | int }}"  # 복구 대기 시간 (초 단위)
+    service_targets: []          # CLI에서 전달받는 fallback 서비스 리스트
+    kill_mode: "{{ lookup('env','SERVICE_MODE') | default('internal', true) }}"  # 실행 모드 (internal/external)
+    disable_autorecover: "{{ lookup('env','DISABLE_AUTORECOVER') | default(true, true) | bool }}"  # 자동 복구 비활성화 여부
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(30, true) | int }}"  # Chaos 유지 시간(초)
 
-  tasks:
+  tasks:                         # 이하부터 실제 실행되는 작업(Task) 정의
     # ─────────────────────────────────────────────
     # 1️⃣ ENV / CLI 서비스 로드
     # ─────────────────────────────────────────────
-    - name: Resolve target services dynamically
+    - name: Resolve target services dynamically  # 환경변수 또는 CLI로부터 Chaos 대상 서비스 파싱
       vars:
-        env_services: "{{ lookup('env', 'TARGET_SERVICES') | default('', true) }}"
-      ansible.builtin.set_fact:
-        effective_services: >-
+        env_services: "{{ lookup('env', 'TARGET_SERVICES') | default('', true) }}"  # CI/CD에서 환경변수로 전달된 서비스명 가져오기
+      ansible.builtin.set_fact:  # 파싱 결과를 fact 변수로 설정
+        effective_services: >-    # 실제로 Chaos에 사용할 서비스 목록
           {{
-            (env_services.split(',') | map('trim') | list)
-            if env_services | length > 0
-            else (service_targets | default([]))
+            (env_services.split(',') | map('trim') | list)   # 환경변수에 값이 있다면 쉼표 기준으로 리스트화
+            if env_services | length > 0                     # 환경변수가 비어있지 않다면
+            else (service_targets | default([]))              # 비어있으면 vars.yml의 fallback 리스트 사용
           }}
-      changed_when: false
+      changed_when: false         # 이 Task는 시스템 변경을 유발하지 않음
 
-    - name: Show resolved service list
+    - name: Show resolved services  # 최종 서비스 목록 디버깅 출력
       ansible.builtin.debug:
-        msg: |
+        msg: |                    # 멀티라인 메시지 출력
           🎯 Chaos 대상 서비스:
-          - ENV(TARGET_SERVICES): {{ lookup('env','TARGET_SERVICES') | default('N/A') }}
-          - Local(vars): {{ service_targets | default([]) }}
-          - Effective: {{ effective_services | join(', ') if effective_services | length > 0 else '랜덤' }}
+          - ENV(TARGET_SERVICES): {{ lookup('env','TARGET_SERVICES') | default('N/A') }}  # 환경변수 입력 값
+          - Local(vars): {{ service_targets | default([]) }}                              # CLI 또는 vars.yml 값
+          - Effective: {{ effective_services | join(', ') if effective_services | length > 0 else '랜덤 선택 없음' }}  # 최종 확정 서비스 리스트
 
     # ─────────────────────────────────────────────
     # 2️⃣ Safety Check
     # ─────────────────────────────────────────────
-    - name: 🧩 Validate namespace
-      ansible.builtin.assert:
+    - name: Validate namespace     # 잘못된 네임스페이스에서 Chaos 실행되지 않도록 검증
+      ansible.builtin.assert:      # 조건 검사 모듈 사용
         that:
-          - target_namespace == "app"
-        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 허용됩니다."
-        success_msg: "✅ namespace 확인 완료 ('app')"
+          - target_namespace == "app"  # Chaos는 app 네임스페이스 내에서만 실행 가능
+        fail_msg: "❌ namespace가 'app'이 아닙니다."  # 실패 시 오류 메시지 출력
+        success_msg: "✅ namespace 확인 완료 ('app')"  # 성공 시 확인 메시지 출력
 
     # ─────────────────────────────────────────────
-    # 3️⃣ Internal Kill Mode - Pod 삭제 및 AutoRecover 차단
+    # 3️⃣ Internal Kill Mode
     # ─────────────────────────────────────────────
-    - name: 💀 Perform internal service kill
-      when: kill_mode == "internal"
-      ansible.builtin.shell: |
-        failed_svcs=""
-        for svc in {{ effective_services | join(' ') }}; do
-          echo "[INTERNAL] $svc: scaling down and deleting pods..."
-          kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | \
-            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-          kubectl get rs -n {{ target_namespace }} -l app=$svc -o name | \
-            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
-          kubectl get sts -n {{ target_namespace }} -l app=$svc -o name | \
-            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true
+    - name: Perform internal service kill  # Internal 모드로 서비스 Pod 삭제 수행
+      when: kill_mode == "internal"        # kill_mode가 internal일 때만 실행
+      ansible.builtin.shell: |             # Shell 스크립트를 통해 실제 Kubernetes 명령 실행
+        failed_svcs=""                     # 실패한 서비스 이름들을 누적 저장할 변수 초기화
+        for svc in {{ effective_services | join(' ') | default('') }}; do  # 서비스 목록 반복
+          echo "[INTERNAL] $svc: disabling auto-recovery and deleting pods..."  # 현재 대상 서비스 출력
+          kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | \  # Deployment 목록 가져오기
+            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # 해당 Deployment 복제본 수 0으로 조정
+          kubectl get rs -n {{ target_namespace }} -l app=$svc -o name | \     # ReplicaSet 목록 가져오기
+            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # ReplicaSet도 0으로 조정
+          kubectl get sts -n {{ target_namespace }} -l app=$svc -o name | \    # StatefulSet 목록 가져오기
+            xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # StatefulSet도 복제본 0으로 설정
 
-          PODS=$(kubectl get pods -n {{ target_namespace }} -l app=$svc -o name)
-          if [ -z "$PODS" ]; then
-            echo "[WARN] No running pods for $svc."
-            failed_svcs="$failed_svcs $svc"
-            continue
+          PODS=$(kubectl get pods -n {{ target_namespace }} -l app=$svc -o name)  # 서비스의 실제 Pod 목록 조회
+          if [ -z "$PODS" ]; then             # Pod가 존재하지 않는 경우
+            echo "[WARN] No pods found for $svc"  # 경고 출력
+            failed_svcs="$failed_svcs $svc"       # 실패 목록에 추가
+            continue                              # 다음 서비스로 넘어감
           fi
-          kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true
+          echo "[DELETE] Deleting pods for $svc"   # 삭제 로그 출력
+          kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true  # Pod 강제 삭제
         done
 
-        if [ -n "$failed_svcs" ]; then
-          echo "[WARN] Internal kill failed for:$failed_svcs"
-          exit 99
+        # 내부 실패 감지
+        if echo "$failed_svcs" | grep -q .; then   # 실패 서비스가 존재하면
+          echo "[FAIL] Internal kill failed for:$failed_svcs"  # 실패 메시지 출력
+          exit 99                                  # 비정상 종료 코드 반환 (fallback 트리거용)
         fi
-      register: internal_result
-      ignore_errors: yes
-      changed_when: true
+      register: internal_result    # 결과를 internal_result 변수에 저장
+      ignore_errors: yes           # 오류 발생 시 플레이 중단하지 않음
+      changed_when: true           # 이 Task는 시스템 상태 변경으로 간주
 
     # ─────────────────────────────────────────────
-    # 4️⃣ Fallback 감지 (Internal → External)
+    # 4️⃣ Internal 실패 시 External 전환
     # ─────────────────────────────────────────────
-    - name: Detect internal failure and switch mode
+    - name: Detect internal failure and switch  # 내부 실패 감지 후 external 모드로 전환
       when:
-        - kill_mode == "internal"
-        - internal_result.rc is defined
-        - internal_result.rc != 0
+        - kill_mode == "internal"              # 현재 모드가 internal일 때만 실행
+        - internal_result.rc is defined        # 반환 코드 존재 확인
+        - internal_result.rc != 0              # 실패 코드가 0이 아닐 경우
       ansible.builtin.set_fact:
-        kill_mode: "external"
-      changed_when: true
+        kill_mode: "external"                  # external 모드로 강제 전환
+      changed_when: true                       # fact 변경으로 태스크 상태 변경 표시
 
-    - name: ⚠️ Announce fallback activation
-      when: kill_mode == "external"
+    - name: Announce fallback activation        # Fallback 모드 전환 알림
+      when: kill_mode == "external"             # external 모드일 때만 실행
       ansible.builtin.debug:
-        msg: "⚠️ Internal 실패 → External Chaos Pod 모드로 전환합니다."
+        msg: "⚠️ Internal 실패 → External Chaos Pod 모드로 전환"  # 경고 메시지 출력
 
     # ─────────────────────────────────────────────
     # 5️⃣ External Mode - 서비스별 Chaos Pod 생성
     # ─────────────────────────────────────────────
-    - name: 🧨 Launch chaos pods for external deletion
-      when: kill_mode == "external"
-      ansible.builtin.shell: |
-        for svc in {{ effective_services | join(' ') }}; do
-          echo "[EXTERNAL] Launching chaos pod for $svc..."
-          kubectl run svc-chaos-$svc --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \
-            --overrides='{
-              "spec": {
-                "containers": [{
-                  "name": "svc-chaos",
-                  "image": "nicolaka/netshoot:latest",
-                  "command": ["/bin/sh","-c"],
-                  "args": [
-                    "echo \"[CHAOS] Deleting pods for $svc...\"; \
-                     kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true; \
-                     echo \"[WAIT] Keeping service offline for {{ chaos_duration }}s...\"; \
-                     sleep {{ chaos_duration }}; \
-                     echo \"[DONE] $svc external chaos complete.\";"
-                  ]
-                }]
-              }
-            }' || true
+    - name: Launch chaos pods for external deletion  # External 모드 실행 시 Chaos Pod 생성
+      when: kill_mode == "external"                 # external 모드일 때만 실행
+      ansible.builtin.shell: |                      # Shell 명령을 통해 Kubernetes에 Chaos Pod 생성
+        for svc in {{ effective_services | join(' ') | default('') }}; do  # 각 서비스 반복
+          echo "[EXTERNAL] Launching chaos pod for $svc..."  # 로그 출력
+          SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-5)  # 무작위 6자리 UUID 생성
+          kubectl run svc-chaos-$SUFFIX \                        # Chaos Pod 생성 (고유 이름 사용)
+            --image=nicolaka/netshoot:latest --restart=Never -n {{ target_namespace }} \  # netshoot 이미지 기반 단발성 Pod 생성
+            --overrides='{                                          
+              "spec": {                                            
+                "containers": [{                                    
+                  "name": "svc-chaos",                             
+                  "image": "nicolaka/netshoot:latest",             
+                  "command": ["/bin/sh","-c"],                      
+                  "args": [                                         
+                    "echo \"[CHAOS] Deleting pods for \$svc...\"; \  # $svc의 실제 Pod 삭제 수행
+                     kubectl delete pod -n {{ target_namespace }} -l app=\$svc --grace-period=0 --force || true; \  # 삭제 명령
+                     echo \"[WAIT] Keeping offline for {{ chaos_duration }}s...\"; \  # Chaos 지속 시간 출력
+                     sleep {{ chaos_duration }}; \                 # chaos_duration 초 동안 대기
+                     echo \"[DONE] \$svc chaos complete.\";"        # 완료 로그 출력
+                  ]                                               
+                }]                                                
+              }                                                  
+            }' || true                                            # 오류 발생해도 계속 진행
         done
-      register: external_result
-      ignore_errors: yes
-      changed_when: true
+      register: external_result     # 실행 결과 저장
+      ignore_errors: yes            # 오류 무시
+      changed_when: true            # 시스템 변경으로 표시
 
     # ─────────────────────────────────────────────
     # 6️⃣ 안정화 대기
     # ─────────────────────────────────────────────
-    - name: ⏳ Wait for recovery_wait seconds
+    - name: Wait for recovery_wait seconds       # Chaos 종료 후 안정화 대기 시간
       ansible.builtin.pause:
-        seconds: "{{ recovery_wait }}"
+        seconds: "{{ recovery_wait }}"           # recovery_wait 값만큼 대기 (기본 60초)
 
     # ─────────────────────────────────────────────
-    # 7️⃣ 현재 상태 점검
+    # 7️⃣ 상태 점검
     # ─────────────────────────────────────────────
-    - name: 🔎 Verify current pod states
+    - name: Verify current pod states            # 현재 Pod 상태 점검
       ansible.builtin.shell: |
         kubectl get pods -n {{ target_namespace }} \
-          -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
-      register: pod_state
-      ignore_errors: yes
-      changed_when: false
+          -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers  # Pod 이름과 상태만 출력
+      register: pod_state                        # 결과를 pod_state 변수에 저장
+      ignore_errors: yes                         # 오류 무시
+      changed_when: false                        # 단순 조회이므로 변경 없음
 
-    - name: 📊 Display pod state summary
+    - name: Display pod state summary            # Pod 상태 요약 출력
       ansible.builtin.debug:
         msg: |
           ✅ Service Kill Chaos 완료
-          {{ pod_state.stdout | default('⚠️ Pod 상태 정보를 가져올 수 없습니다.') }}
+          {{ pod_state.stdout | default('⚠️ Pod 상태 정보를 가져올 수 없습니다.') }}  # Pod 상태 정보 출력 또는 경고 표시
 
     # ─────────────────────────────────────────────
     # 8️⃣ Chaos 로그 기록
     # ─────────────────────────────────────────────
-    - name: 🪵 Write chaos summary to log
+    - name: Write chaos summary to log           # Chaos 결과를 로그 파일에 기록
       ansible.builtin.lineinfile:
-        path: "{{ chaos_log_path }}"
-        create: true
-        line: |
-          [{{ ansible_date_time.iso8601 }}] ServiceKill ns={{ target_namespace }} mode={{ kill_mode }} targets={{ effective_services | join(', ') }} result="{{ pod_state.stdout | replace('\n','; ') }}"
-      become: true
+        path: "{{ chaos_log_path }}"             # 로그 파일 경로
+        create: true                             # 파일이 없으면 새로 생성
+        line: |                                  # 로그 내용
+          [{{ lookup('pipe','date -Iseconds') }}] ServiceKill(ns={{ target_namespace }}) mode={{ kill_mode }} duration={{ chaos_duration }} targets={{ effective_services | join(', ') | default('none') }} result="{{ pod_state.stdout | default('N/A') | replace('\n','; ') }}"
+      become: true                               # root 권한 필요 (로그 파일 경로 접근용)
 
     # ─────────────────────────────────────────────
     # 9️⃣ 최종 요약
     # ─────────────────────────────────────────────
-    - name: ✅ Final summary
+    - name: Final summary                        # 최종 결과 요약 출력
       ansible.builtin.debug:
-        msg: |
+        msg: |                                   # 멀티라인 출력
           ✅ Service Kill Chaos Completed
-          - Namespace: {{ target_namespace }}
-          - Mode: {{ kill_mode }}
-          - Targets: {{ effective_services | join(', ') if effective_services | length > 0 else 'N/A' }}
-          - Duration: {{ chaos_duration }}초
-          - Recovery Wait: {{ recovery_wait }}초
-          - Log: {{ chaos_log_path }}
+          - Namespace: {{ target_namespace }}     # 네임스페이스 표시
+          - Mode: {{ kill_mode }}                 # 실행 모드 (internal / external)
+          - Targets: {{ effective_services | join(', ') | default('N/A') }}  # Chaos 주입 대상
+          - Duration: {{ chaos_duration }}초      # Chaos 유지 시간
+          - Recovery Wait: {{ recovery_wait }}초  # 복구 대기 시간
+          - Log: {{ chaos_log_path }}             # Chaos 로그 파일 경로
