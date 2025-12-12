@@ -13,7 +13,7 @@
 **백엔드/인프라 팀 필독:** YAML 파일 작성 시 아래 라벨 표준을 반드시 준수해야 합니다. (Chaos 스크립트 타겟팅용)
 
 ###  기본 Namespace
-* 모든 Online Boutique 서비스: `online-boutique`
+* 모든 Online Boutique 서비스: `app`
 
 ###  공통 라벨 표준 (Key: Value)
 * `app`: 서비스 식별자 (예: `frontend`, `cartservice`) **[절대 변경 금지]**
@@ -46,6 +46,9 @@
 
 **(8) redis-cart**
 `app: redis-cart` / `tier: data`
+
+**(9) currencyservice**
+`app: currencyservice.` / `tier: backend`
 
 ---
 
