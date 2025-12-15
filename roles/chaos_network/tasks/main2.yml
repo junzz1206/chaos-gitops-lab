@@ -1,0 +1,138 @@
+# ─────────────────────────────────────────────  # 파일 상단 구분선: 시각적 구분용
+# 파일: roles/chaos_network/tasks/main.yml      # 이 Ansible 역할의 메인 tasks 파일 경로
+# 목적:                                         # 이 파일의 목적 설명 블록 시작
+#   - HTTPChaos manifest를 서비스별로 생성/적용/삭제  # 각 서비스별 Chaos Mesh HTTPChaos manifest 관리
+#   - CI/CD 환경 변수 기반 자동화 지원           # GitLab/Jenkins/ArgoCD 등에서 환경변수로 제어 가능
+#   - 하드코딩 제거 및 Chaos Mesh L7 트래픽 완전 지원  # 값은 전부 변수/환경변수에서 오도록 하고 L7 Chaos 주입
+# ─────────────────────────────────────────────  # 파일 상단 구분선 끝
+
+# 1️⃣ Safety Check (허용 네임스페이스 기반)      # 1단계: 네임스페이스 안전성 검사 섹션
+- name: Parse allowed namespaces                # 허용 네임스페이스 문자열을 리스트로 파싱하는 작업 이름
+  ansible.builtin.set_fact:                    # set_fact 모듈로 런타임 변수 정의
+    allowed_namespaces: "{{ lookup('env','ALLOWED_NAMESPACES') | default('app,online-boutique', true) }}"  # ALLOWED_NAMESPACES 환경변수 또는 기본값 사용
+    allowed_namespace_list: "{{ allowed_namespaces.split(',') | map('trim') | list }}"  # 콤마로 분리 후 공백 제거해서 리스트로 변환
+  changed_when: false                           # 이 작업은 상태 변경으로 간주하지 않음
+
+- name: Validate target namespace safety        # target_namespace가 허용 리스트 안에 있는지 검증하는 작업 이름
+  ansible.builtin.assert:                       # assert 모듈로 조건 검증
+    that:                                       # 참이어야 하는 조건 목록
+      - target_namespace in allowed_namespace_list  # target_namespace가 허용된 네임스페이스 리스트에 포함돼야 함
+    fail_msg: "❌ Namespace {{ target_namespace }} is not allowed. Allowed: {{ allowed_namespace_list | join(', ') }}"  # 조건 실패 시 출력할 에러 메시지
+    success_msg: "✅ Namespace validated: {{ target_namespace }}"  # 조건 성공 시 출력할 성공 메시지
+
+# 2️⃣ 환경 변수 기반 설정                        # 2단계: Chaos 동작에 필요한 설정값 정의 섹션
+- name: Define HTTPChaos configuration          # HTTPChaos 관련 설정값을 계산/결정하는 작업 이름
+  ansible.builtin.set_fact:                     # set_fact로 플레이 중 사용할 변수 설정
+    http_delay_ms: "{{ lookup('env','HTTP_DELAY_MS') | default(http_delay_ms | default(2000), true) }}"  # HTTP 지연(ms): env → 기존 변수 → 기본값(2000)
+    http_abort_percent: "{{ lookup('env','HTTP_ABORT_PERCENT') | default(http_abort_percent | default(0), true) }}"  # HTTP 실패율(%): env → 기존 변수 → 기본값(0)
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(chaos_duration | default('60s'), true) }}"  # Chaos 유지 시간: env → 기존 변수 → 기본값('60s')
+    http_port: "{{ lookup('env','HTTP_PORT') | default(http_port | default(8080), true) }}"  # HTTP 포트: env → 기존 변수 → 기본값(8080)
+    chaos_manifest_dir: "{{ lookup('env','CHAOS_MANIFEST_DIR') | default('/tmp/chaos-httpchaos-' ~ lookup('pipe','date +%s'), true) }}"  # manifest 저장 디렉토리: env 또는 타임스탬프 포함 동적 경로
+    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"  # TARGET_SERVICES 환경변수(없으면 빈 문자열)
+    effective_target_services: >-               # 최종적으로 사용할 서비스 리스트 결정
+      {{
+        (env_target_services.split(',') | map('trim') | list)  # TARGET_SERVICES가 비어있지 않다면 콤마로 나눠 리스트로 변환
+        if env_target_services | length > 0                    # env_target_services 길이가 0보다 크면 이 분기
+        else ['frontend','checkoutservice']                    # 비어있으면 기본 타겟 서비스 리스트(frontend, checkoutservice) 사용
+      }}
+  changed_when: false                           # 환경 설정 계산만 하므로 변경 없음 처리
+
+- name: Display configuration summary           # 위에서 계산한 설정값들을 출력하는 작업 이름
+  ansible.builtin.debug:                        # debug 모듈로 로그 출력
+    msg: |                                      # 여러 줄 문자열로 요약 정보 표시
+      ⚙️ HTTPChaos Configuration                # 설정 요약 제목(사람이 보기 위한 정보)
+      - Namespace: {{ target_namespace }}       # Chaos 대상 네임스페이스
+      - Delay: {{ http_delay_ms }}ms            # HTTP 지연 시간(ms)
+      - Abort: {{ http_abort_percent }}%        # HTTP 실패율(%)
+      - Duration: {{ chaos_duration }}          # Chaos 유지 시간(원본 문자열 형식)
+      - Port: {{ http_port }}                   # 대상 HTTP 포트
+      - Manifest Dir: {{ chaos_manifest_dir }}  # manifest 파일들이 저장될 디렉토리 경로
+      - Targets: {{ effective_target_services | join(', ') }}  # 실제 타겟 서비스 목록(콤마로 연결)
+
+# 3️⃣ Chaos manifest 디렉토리 생성               # 3단계: manifest 저장용 디렉토리 사전 생성
+- name: Ensure manifest directory exists        # manifest 디렉토리를 만들어두는 작업 이름
+  ansible.builtin.file:                         # file 모듈로 파일/디렉토리 상태 관리
+    path: "{{ chaos_manifest_dir }}"            # 생성/유지할 디렉토리 경로
+    state: directory                            # 디렉토리 상태를 보장
+    mode: '0755'                                # 퍼미션: 소유자 rwx, 그룹/기타 rx
+
+# 4️⃣ HTTPChaos manifest 생성                    # 4단계: 각 서비스별 HTTPChaos manifest 템플릿 렌더링
+- name: Render manifests for each service       # 타겟 서비스마다 manifest를 생성하는 작업 이름
+  ansible.builtin.template:                     # template 모듈: Jinja2 템플릿 렌더링
+    src: "templates/httpchaos.yml.j2"           # 사용될 템플릿 파일 경로(roles/chaos_network/templates/ 아래)
+    dest: "{{ chaos_manifest_dir }}/httpchaos-{{ svc }}.yml"  # 렌더링 결과를 저장할 파일 경로(서비스명 포함)
+  loop: "{{ effective_target_services }}        "  # effective_target_services 리스트를 순회(loop)  ← 공백까지 포함된 원문 유지
+  loop_control:                                 # loop 동작 제어 블록
+    loop_var: svc                               # 루프 변수 이름을 svc로 지정(각 타겟 서비스 이름)
+  vars:                                         # 템플릿에 전달할 변수들
+    namespace: "{{ target_namespace }}"         # 템플릿에서 사용할 namespace 변수
+    service_name: "{{ svc }}"                   # 템플릿에서 사용할 service_name 변수(현재 서비스)
+    delay_ms: "{{ http_delay_ms }}"             # 템플릿에서 사용할 delay_ms 값
+    abort_percent: "{{ http_abort_percent }}"   # 템플릿에서 사용할 abort_percent 값
+    duration: "{{ chaos_duration }}"            # 템플릿에서 사용할 duration 값
+    port: "{{ http_port }}"                     # 템플릿에서 사용할 port 값
+    run_id: "{{ lookup('pipe','date +%s') }}"   # 실행 시점을 기준으로 한 타임스탬프 run_id(이름 유니크하게 만들 때 사용)
+  changed_when: true                            # manifest 파일이 생성/갱신되므로 변경이 발생한 것으로 처리
+
+# 5️⃣ Chaos Mesh 적용                            # 5단계: 생성된 manifest들을 실제로 클러스터에 적용
+- name: Apply HTTPChaos manifests (safe)        # HTTPChaos 리소스를 안전하게 적용하는 작업 이름
+  ansible.builtin.shell: |                      # 셸 명령어 블록 실행
+    files=$(ls {{ chaos_manifest_dir }}/httpchaos-*.yml 2>/dev/null || true)  # manifest 파일 목록을 가져오고 에러는 무시
+    if [ -z "$files" ]; then                    # 파일 목록이 비어 있다면
+      echo "No manifests found in {{ chaos_manifest_dir }}"  # manifest 없음 메시지 출력
+      exit 0                                    # 오류가 아니라 정상 종료
+    fi                                          # if 종료
+    for f in $files; do                         # 찾은 manifest 파일들에 대해 루프 시작
+      echo "[APPLY] $f"                         # 어떤 파일을 적용하는지 표시
+      kubectl apply -f "$f" --namespace {{ target_namespace }}  # kubectl로 HTTPChaos 리소스 적용(대상 네임스페이스 지정)
+    done                                        # for 루프 종료
+  register: apply_result                        # 셸 명령 실행 결과를 apply_result 변수에 저장
+  changed_when: "'No manifests found' not in apply_result.stdout"  # manifest가 없다는 메시지가 없으면 변경이 있었다고 간주
+
+# 6️⃣ Chaos 유지 시간 계산 및 대기              # 6단계: chaos_duration 문자열을 초 단위로 변환하고 그 시간만큼 대기
+- name: Convert chaos_duration to seconds       # chaos_duration을 초(정수)로 바꾸는 작업 이름
+  ansible.builtin.set_fact:                     # set_fact로 chaos_seconds 변수를 설정
+    chaos_seconds: >-                           # 여러 줄 Jinja2 표현식으로 값 계산
+      {% set d = chaos_duration %}              # d에 chaos_duration 값 할당
+      {% if d is match('^\\d+s$') %}            # "숫자 + s" 형식인지 검사 (예: 60s)
+        {{ (d | regex_replace('s$','') | int) }}  # 끝의 s를 제거하고 정수로 변환
+      {% elif d is match('^\\d+m$') %}          # "숫자 + m" 형식인지 검사 (예: 2m)
+        {{ (d | regex_replace('m$','') | int) * 60 }}  # 분을 초로 변환(곱하기 60)
+      {% elif d is match('^\\d+h$') %}          # "숫자 + h" 형식인지 검사 (예: 1h)
+        {{ (d | regex_replace('h$','') | int) * 3600 }}  # 시간을 초로 변환(곱하기 3600)
+      {% elif d is match('^\\d+$') %}           # 순수 숫자만 있는 경우(이미 초로 간주)
+        {{ d | int }}                           # 그냥 정수로 변환
+      {% else %}                                # 위 형식들에 해당하지 않는 예외 케이스
+        60                                      # 기본값으로 60초 사용
+      {% endif %}                               # if 블록 종료
+
+- name: Wait for chaos duration                 # 변환된 시간 동안 Chaos를 유지하기 위해 대기하는 작업 이름
+  ansible.builtin.pause:                        # pause 모듈로 일시정지
+    seconds: "{{ chaos_seconds }}"              # 앞에서 계산한 chaos_seconds 값만큼 대기
+
+# 7️⃣ Chaos 복구                                  # 7단계: HTTPChaos 리소스를 삭제하여 정상 상태로 복구
+- name: Delete HTTPChaos manifests (safe)       # HTTPChaos manifest를 안전하게 삭제하는 작업 이름
+  ansible.builtin.shell: |                      # 셸 명령어 블록 실행
+    files=$(ls {{ chaos_manifest_dir }}/httpchaos-*.yml 2>/dev/null || true)  # manifest 파일 목록 조회(에러 무시)
+    if [ -n "$files" ]; then                    # 파일이 하나 이상 존재하면
+      for f in $files; do                       # 각 파일에 대해 루프
+        echo "[DELETE] $f"                      # 삭제 대상 파일 표시
+        kubectl delete -f "$f" --namespace {{ target_namespace }} || true  # kubectl로 리소스 삭제, 실패해도 전체 실패로 보지 않음
+      done                                      # for 루프 종료
+    else                                        # 파일이 전혀 없으면
+      echo "No manifests to delete"             # 삭제할 manifest가 없다는 메시지 출력
+    fi                                          # if 종료
+  changed_when: true                            # 삭제 작업은 항상 변경이 발생한 것으로 처리
+
+# 8️⃣ 결과 요약                                   # 8단계: Chaos 테스트 결과를 요약해서 출력
+- name: Final summary                           # 요약 정보를 출력하는 작업 이름
+  ansible.builtin.debug:                        # debug 모듈로 문자열 출력
+    msg: |                                      # 여러 줄 메시지
+      ✅ HTTPChaos Completed                     # Chaos 테스트 완료 표시
+      - Namespace: {{ target_namespace }}       # 사용된 네임스페이스
+      - Duration: {{ chaos_duration }} ({{ chaos_seconds }}s)  # duration 원본 값과 초 단위 값 함께 표시
+      - Delay: {{ http_delay_ms }}ms            # HTTP 지연 시간
+      - Abort: {{ http_abort_percent }}%        # HTTP 실패율
+      - Port: {{ http_port }}                   # 대상 HTTP 포트
+      - Targets: {{ effective_target_services | join(', ') }}  # 실제 타겟 서비스 목록
+      - Manifest Dir: {{ chaos_manifest_dir }}  # manifest 파일이 위치한 디렉토리 경로
