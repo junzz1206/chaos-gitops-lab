@@ -38,7 +38,7 @@ spec:
               - ALL
           privileged: false
           readOnlyRootFilesystem: true
-        image: us-central1-docker.pkg.dev/google-samples/microservices-demo/currencyservice:v0.10.4
+        image: ghcr.io/junzz1206/ob-currencyservice:latest
         ports:
         - containerPort: 7000
         env:
