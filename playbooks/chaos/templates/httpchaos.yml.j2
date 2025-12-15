@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────
+# 파일: playbooks/chaos/templates/httpchaos.yml.j2
+# 목적:
+#   - HTTPChaos CRD 정의를 서비스별로 동적으로 생성
+#   - Ansible template 모듈에서 모든 변수 주입
+#   - CI/CD 환경변수 기반 완전 자동화 및 L7 Chaos 주입 지원
+# ─────────────────────────────────────────────
+
+apiVersion: chaos-mesh.org/v1alpha1             # Chaos Mesh API 버전 (고정)
+kind: HTTPChaos                                 # Chaos 리소스 종류 (HTTPChaos)
+metadata:
+  name: "httpchaos-{{ service_name }}-{{ run_id }}"  # 서비스명 + 실행ID로 고유 리소스명 생성
+  namespace: "{{ namespace }}"                  # Chaos 적용 네임스페이스 (Ansible 변수 주입)
+  labels:                                       # 메타데이터 라벨 정의
+    app.kubernetes.io/name: "{{ service_name }}"  # 서비스명 라벨
+    app.kubernetes.io/part-of: "{{ lookup('env','PROJECT_NAME') | default('chaos-lab', true) }}"  # 프로젝트명 동적 주입
+    app.kubernetes.io/component: "http-chaos"   # Chaos 유형 라벨
+    chaos-run-id: "{{ run_id }}"                # 실행 ID 라벨 (로그 구분용)
+spec:
+  mode: "{{ lookup('env','CHAOS_MODE') | default('all', true) }}"  # Chaos Mesh 적용 모드 (env 제어)
+  selector:                                     # 대상 Pod 선택자 정의
+    namespaces:
+      - "{{ namespace }}"                       # 대상 네임스페이스
+    labelSelectors:
+      app: "{{ service_name }}"                 # app 레이블 기준 Pod 선택
+  target: "{{ lookup('env','HTTP_TARGET') | default('Request', true) }}"  # Chaos 주입 대상 (Request/Response)
+  port: {{ port }}                              # HTTP 포트
+  method: "{{ lookup('env','HTTP_METHOD') | default('GET', true) }}"  # Chaos 적용 HTTP 메서드
+  path: "{{ lookup('env','HTTP_PATH') | default('/', true) }}"         # Chaos 적용 경로
+  {% if delay_ms | int > 0 %}                   # 조건부 지연 Chaos 적용
+  delay:
+    latency: "{{ delay_ms }}ms"                 # 지연 시간 (밀리초)
+  {% endif %}
+  {% if abort_percent | int > 0 %}              # 조건부 실패율 Chaos 적용
+  abort:
+    httpStatus: {{ lookup('env','HTTP_STATUS') | default(500, true) }}  # 실패 시 반환할 상태 코드
+    percentage: {{ abort_percent }}             # 실패율 비율 (%)
+  {% endif %}
+  duration: "{{ duration }}"                    # Chaos 유지 시간 (예: 60s, 1m)
