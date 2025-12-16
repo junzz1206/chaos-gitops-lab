@@ -1,1 +1,185 @@
-# chaos_kill tasks will be added here
+# ─────────────────────────────────────────────
+# 파일: roles/chaos_kill/tasks/main.yml  # 파일 경로
+# 목적:
+#   - 지정된 서비스의 Pod 강제 삭제 및 상위 오브젝트 자동복구 차단
+#   - TARGET_SERVICES 환경변수로 다중 지정 가능
+#   - internal 실패 시 서비스별 external fallback (전체 kill 아님)
+#   - CI/CD(GitLab, ArgoCD 등) 환경변수 기반 주입 지원
+#   - CI/CD 중단 시 안전한 graceful 종료 설계
+#   - 모든 Chaos Pod에 공통 라벨(app.kubernetes.io/*) 적용
+# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# 0️⃣ 네임스페이스 안전 검증
+# ─────────────────────────────────────────────
+- name: Validate namespace safety  # 네임스페이스 유효성 검사
+  ansible.builtin.assert:  # assert 모듈로 조건 검사
+    that:  # 검사 조건 정의
+      - target_namespace == "app"  # app 네임스페이스 내에서만 허용
+    fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 수행됩니다."  # 실패 시 메시지
+    success_msg: "✅ namespace 확인 완료"  # 성공 시 메시지
+
+# ─────────────────────────────────────────────
+# 1️⃣ 기본 서비스 목록 및 CI/CD 환경 변수 읽기
+# ─────────────────────────────────────────────
+- name: Load chaos configuration and service list  # Chaos 설정 및 서비스 목록 로드
+  vars:  # 로컬 변수 블록
+    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"  # CI/CD 환경변수로부터 서비스 목록 로드
+  ansible.builtin.set_fact:  # 동적으로 변수 설정
+    default_services:  # 기본 서비스 목록 (환경변수 미지정 시 사용)
+      - frontend  # 프론트엔드
+      - productcatalogservice  # 상품 카탈로그
+      - cartservice  # 장바구니
+      - checkoutservice  # 결제 처리
+      - paymentservice  # 결제 서비스
+      - shippingservice  # 배송 서비스
+      - emailservice  # 이메일 서비스
+      - redis-cart  # 캐시 서비스
+    effective_target_services: >-  # 최종 대상 서비스 목록 계산
+      {{
+        (env_target_services.split(',') | map('trim') | list)  # 환경변수에서 쉼표 기준 분리
+        if env_target_services | length > 0  # 환경변수가 존재할 경우
+        else default_services  # 그렇지 않으면 기본 서비스 사용
+      }}
+  changed_when: false  # 변경 사항 없음으로 처리 (정보 로딩만 수행)
+
+- name: Show chaos configuration  # 현재 Chaos 설정 디버그 출력
+  ansible.builtin.debug:
+    msg: |  # 여러 줄 출력
+      ⚙️ Chaos Kill Configuration
+      - Namespace: {{ target_namespace }}  # 네임스페이스 표시
+      - Targets: {{ effective_target_services | join(', ') }}  # 대상 서비스 표시
+      - Duration: {{ chaos_duration | default(30) }}s  # 지속 시간 표시
+
+# ─────────────────────────────────────────────
+# 2️⃣ 자동 복구 차단 (Deployment / RS / StatefulSet scale 0)
+# ─────────────────────────────────────────────
+- name: Disable auto-recovery for selected services  # 자동복구 차단 (Deployment/RS/STS scale 0)
+  when: disable_autorecover | default(true)  # disable_autorecover=true일 때만 실행
+  ansible.builtin.shell: |  # 셸 명령 실행
+    for svc in {{ effective_target_services | join(' ') }}; do  # 서비스별 반복
+      echo "[DISABLE] Scaling down controllers for $svc..."  # 로그 출력
+      # Deployment scale 0
+      kubectl get deploy -n {{ target_namespace }} -l app=$svc -o name | \
+        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # Replica 0으로 축소
+      # ReplicaSet scale 0
+      kubectl get rs -n {{ target_namespace }} -l app=$svc -o name | \
+        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # ReplicaSet 축소
+      # StatefulSet scale 0
+      kubectl get sts -n {{ target_namespace }} -l app=$svc -o name | \
+        xargs -r -I{} kubectl scale {} -n {{ target_namespace }} --replicas=0 || true  # StatefulSet 축소
+    done  # 반복 종료
+  register: disable_result  # 결과 저장
+  ignore_errors: yes  # 오류 발생 시 무시
+  changed_when: true  # 변경 발생으로 표시
+
+# ─────────────────────────────────────────────
+# 3️⃣ Internal Pod Kill (1차 시도)
+# ─────────────────────────────────────────────
+- name: Attempt pod kill via internal execution  # Internal 모드 Pod 강제 삭제 시도
+  ansible.builtin.shell: |  # 셸 명령 실행
+    failed_services=""  # 실패한 서비스 목록 초기화
+    for svc in {{ effective_target_services | join(' ') }}; do  # 모든 서비스 반복
+      echo "[TRY] Killing pods for $svc (internal)..."  # 현재 작업 로그 출력
+      POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)  # 첫 번째 Pod 추출
+      if [ -n "$POD" ]; then  # Pod가 존재하면
+        kubectl exec -n {{ target_namespace }} $POD -- sh -c "echo ok" >/dev/null 2>&1 || failed_services="$failed_services $svc"  # sh 실행 가능 여부 확인
+        echo "[DELETE] $svc → Deleting pods..."  # 삭제 로그 출력
+        kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true  # 강제 삭제
+      else  # Pod가 없으면
+        echo "[SKIP] No running pods for $svc"  # 스킵 로그 출력
+      fi  # 조건 종료
+    done  # 반복 종료
+    if [ -n "$failed_services" ]; then  # 실패한 서비스 존재 시
+      echo "[WARN] Internal mode failed for:$failed_services"  # 경고 로그 출력
+      exit 99  # fallback 트리거를 위한 종료 코드 반환
+    fi  # 조건 종료
+  register: internal_kill_result  # 실행 결과 저장
+  ignore_errors: yes  # 실패 시에도 계속 진행
+  changed_when: true  # 변경 발생으로 간주
+
+# ─────────────────────────────────────────────
+# 4️⃣ Internal 실패 시 External fallback
+# ─────────────────────────────────────────────
+- name: External chaos fallback for failed services  # External fallback 단계
+  when: internal_kill_result.rc is defined and internal_kill_result.rc != 0  # Internal 실패 시 실행
+  ansible.builtin.shell: |  # 셸 명령 실행
+    echo "[FALLBACK] Switching to external chaos for failed services..."  # fallback 로그
+    for svc in {{ effective_target_services | join(' ') }}; do  # 서비스별 반복
+      echo "[EXTERNAL] Deploying helper pod for $svc..."  # External 실행 로그
+      SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-5)  # UUID 5자리 접미사로 중복 방지
+      if [ "$svc" = "frontend" ]; then TIER="frontend";  # tier 자동 분류
+      elif [ "$svc" = "redis-cart" ]; then TIER="data"; else TIER="backend"; fi  # 기본 backend
+      LABELS="app=\$svc,app.kubernetes.io/name=\$svc,app.kubernetes.io/part-of=online-boutique-chaos-lab,app.kubernetes.io/tier=\$TIER,app.kubernetes.io/component=chaos-kill"  # 공통 라벨 지정
+      kubectl run chaos-kill-$svc-$SUFFIX \  # helper pod 생성
+        --image=alpine:3.19 --restart=Never -n {{ target_namespace }} \  # 단일 실행 Pod
+        --labels="$LABELS" \  # 라벨 부여
+        --command -- sh -c '  # 셸 명령 실행
+          apk add --no-cache curl bash >/dev/null 2>&1 || true;  # 최소 유틸 설치
+          echo "[EXTERNAL CHAOS] Deleting pods for $svc...";  # 시작 로그
+          kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true;  # Pod 강제 삭제
+          sleep {{ chaos_duration | default(30) }};  # Chaos 유지
+          echo "[RECOVERY] Chaos complete for $svc";  # 완료 로그
+          echo "[SELF-DELETE] Removing helper pod...";  # 자기 삭제 로그
+          kubectl delete pod $(hostname) -n {{ target_namespace }} --force --grace-period=0 || true;  # 자기 자신 삭제
+        ' || true  # 실패 시 무시
+    done  # 반복 종료
+  register: fallback_result  # 결과 저장
+  ignore_errors: yes  # 일부 실패 무시
+  changed_when: true  # 시스템 상태 변경으로 표시
+
+- name: Log fallback result  # fallback 결과 출력
+  when: internal_kill_result.rc is defined and internal_kill_result.rc != 0
+  ansible.builtin.debug:
+    msg: |
+      ⚠️ Internal mode failed → external fallback applied
+      {{ fallback_result.stdout | default('No log output') }}
+
+# ─────────────────────────────────────────────
+# 5️⃣ Random Chaos Mode (서비스 미지정 시 자동 랜덤 주입)
+# ─────────────────────────────────────────────
+- name: Execute random chaos mode  # 랜덤 chaos 모드 실행
+  when: effective_target_services | length == 0  # 대상 서비스 미지정 시 실행
+  ansible.builtin.shell: |  # 셸 명령 실행
+    chaos_targets="frontend productcatalogservice cartservice checkoutservice paymentservice shippingservice emailservice redis-cart"  # chaos 대상 후보
+    svc=$(shuf -e $chaos_targets -n 1)  # 랜덤 선택
+    echo "[RANDOM] Randomly selected: $svc"  # 로그 출력
+    kubectl delete pod -n {{ target_namespace }} -l app=$svc --grace-period=0 --force || true  # Pod 강제 삭제
+  register: random_kill_result  # 결과 저장
+  ignore_errors: yes
+  changed_when: true
+
+# ─────────────────────────────────────────────
+# 6️⃣ Chaos 유지 및 검증
+# ─────────────────────────────────────────────
+- name: Wait for chaos duration  # Chaos 유지 시간 대기
+  ansible.builtin.pause:
+    seconds: "{{ chaos_duration | default(30) }}"
+
+- name: Verify non-running pods  # 실행 중이지 않은 Pod 확인
+  ansible.builtin.shell: |
+    kubectl get pods -n {{ target_namespace }} --field-selector=status.phase!=Running
+  register: non_running_pods
+  ignore_errors: yes
+  changed_when: false
+
+# ─────────────────────────────────────────────
+# 7️⃣ 결과 출력 및 로깅
+# ─────────────────────────────────────────────
+- name: Display final chaos result
+  ansible.builtin.debug:
+    msg: |
+      ✅ Chaos Kill Completed
+      - Namespace: {{ target_namespace }}
+      - Targets: {{ effective_target_services | join(', ') }}
+      - Duration: {{ chaos_duration | default(30) }}s
+      - Unhealthy Pods:
+      {{ non_running_pods.stdout | default('None (All Running)') }}
+
+- name: Log chaos result to file
+  ansible.builtin.lineinfile:
+    path: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"
+    create: yes
+    line: |
+      [{{ ansible_date_time.iso8601 }}] ChaosKill ns={{ target_namespace }} targets={{ effective_target_services | join(',') }} duration={{ chaos_duration | default(30) }}s result={{ non_running_pods.stdout | replace('\n','; ') }}
+  become: yes

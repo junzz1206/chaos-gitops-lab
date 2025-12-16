@@ -1,0 +1,169 @@
+# ─────────────────────────────────────────────
+# playbooks/chaos/run_service_kill.yml
+# 목적:
+#   - Internal 방식 Service Kill Chaos
+#   - ENV → 파일 → 전역변수 fallback
+#   - GitOps/ArgoCD 복구 전제
+# ─────────────────────────────────────────────
+
+- name: Run Service Kill Chaos (Internal Only, ENV→File Fallback, Global Vars First)
+  hosts: k3s_master
+  become: yes
+
+  vars:
+    # ⚠️ 계산 금지 영역 (상수만)
+    target_namespace_effective: "{{ target_namespace | default('app') }}"
+    chaos_log_path_effective: "{{ chaos_log_path | default('/var/log/chaos_test.log') }}"
+
+    service_kill_duration_fallback: 30   # 초
+    recovery_wait_fallback: 5
+    scale_down_enabled_fallback: true
+
+  tasks:
+    # ─────────────────────────────────────────────
+    # 0️⃣ Safety Check
+    # ─────────────────────────────────────────────
+    - name: Safety Check - namespace
+      ansible.builtin.assert:
+        that:
+          - target_namespace_effective == "app"
+        fail_msg: "❌ namespace가 'app'이 아닙니다."
+        success_msg: "✅ namespace 확인 완료 ('app')"
+
+    # ─────────────────────────────────────────────
+    # 1️⃣ scale_down_enabled 계산
+    # ─────────────────────────────────────────────
+    - name: Resolve scale_down_enabled (ENV → Global → Default)
+      ansible.builtin.set_fact:
+        scale_down_enabled: >-
+          {{
+            (lookup('env','SCALE_DOWN_ENABLED') | default('', true)) | length > 0
+            | ternary(
+                lookup('env','SCALE_DOWN_ENABLED') | bool,
+                (scale_down_enabled | default(scale_down_enabled_fallback) | bool)
+              )
+          }}
+      changed_when: false
+
+    # ─────────────────────────────────────────────
+    # 2️⃣ Chaos Duration 계산
+    # ─────────────────────────────────────────────
+    - name: Resolve service_kill_duration (ENV → Global → Fallback)
+      ansible.builtin.set_fact:
+        service_kill_duration: >-
+          {{
+            (lookup('env','CHAOS_DURATION') | default('', true)) | length > 0
+            | ternary(
+                lookup('env','CHAOS_DURATION') | int,
+                (chaos_duration | default(service_kill_duration_fallback) | int)
+              )
+          }}
+      changed_when: false
+
+    # ─────────────────────────────────────────────
+    # 3️⃣ Recovery Wait 계산
+    # ─────────────────────────────────────────────
+    - name: Resolve recovery_wait_seconds
+      ansible.builtin.set_fact:
+        recovery_wait_seconds: >-
+          {{
+            (lookup('env','RECOVERY_WAIT') | default('', true)) | length > 0
+            | ternary(
+                lookup('env','RECOVERY_WAIT') | int,
+                (recovery_wait | default(recovery_wait_fallback) | int)
+              )
+          }}
+      changed_when: false
+
+    # ─────────────────────────────────────────────
+    # 4️⃣ Service Target 로딩
+    # ─────────────────────────────────────────────
+    - name: Init fallback dict
+      ansible.builtin.set_fact:
+        service_kill_targets: []
+      changed_when: false
+
+    - name: Check service_kill_targets.yml exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../service_kill_targets.yml"
+      register: svc_file
+
+    - name: Include service_kill_targets.yml
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../service_kill_targets.yml"
+      when: svc_file.stat.exists
+
+    - name: Apply fallback list
+      ansible.builtin.set_fact:
+        effective_services: >-
+           {{
+             (
+               (lookup('env','TARGET_SERVICES') | default('', true)) | length > 0
+             )
+             | ternary(
+                 lookup('env','TARGET_SERVICES').split(',') | map('trim') | list,
+                 service_kill_targets | default([])
+               )    
+           }}
+      changed_when: false
+
+    - name: Display effective target list
+      ansible.builtin.debug:
+        msg: |
+          🎯 Service Kill Chaos 설정
+          - Namespace: {{ target_namespace_effective }}
+          - Targets: {{ effective_services | join(', ') }}
+          - Duration: {{ service_kill_duration }}s
+          - Scale Down: {{ scale_down_enabled }}
+          - Recovery Wait: {{ recovery_wait_seconds }}s
+
+    # ─────────────────────────────────────────────
+    # 5️⃣ Internal Service Kill
+    # ─────────────────────────────────────────────
+    - name: Scale down target deployments
+      when: scale_down_enabled
+      ansible.builtin.shell: |
+        for svc in {{ effective_services | join(' ') }}; do
+          echo "[CHAOS] Scaling down $svc"
+          kubectl scale deploy "$svc" -n {{ target_namespace_effective }} --replicas=0 || true
+        done
+      changed_when: true
+
+    - name: Hold chaos duration
+      ansible.builtin.pause:
+        seconds: "{{ service_kill_duration }}"
+
+    # ─────────────────────────────────────────────
+    # 6️⃣ 상태 확인
+    # ─────────────────────────────────────────────
+    - name: Get deployment state
+      ansible.builtin.shell: |
+        kubectl get deploy -n {{ target_namespace_effective }} \
+          -o custom-columns="NAME:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas" --no-headers
+      register: deploy_state
+      changed_when: false
+
+    # ─────────────────────────────────────────────
+    # 7️⃣ 로그 기록
+    # ─────────────────────────────────────────────
+    - name: Write chaos log
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path_effective }}"
+        create: true
+        line: |
+          [{{ ansible_date_time.iso8601 }}] ServiceKill ns={{ target_namespace_effective }} targets={{ effective_services | join(',') }} duration={{ service_kill_duration }}s scale_down={{ scale_down_enabled }} deploy="{{ deploy_state.stdout | replace('\n','; ') }}"
+      become: true
+
+    # ─────────────────────────────────────────────
+    # 8️⃣ 최종 요약
+    # ─────────────────────────────────────────────
+    - name: Final summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ Service Kill Chaos 완료
+          - Namespace: {{ target_namespace_effective }}
+          - Targets: {{ effective_services | join(', ') }}
+          - Duration: {{ service_kill_duration }}s
+          - Recovery: restore_all.yml (ArgoCD GitOps)
+          - Log: {{ chaos_log_path_effective }}
+

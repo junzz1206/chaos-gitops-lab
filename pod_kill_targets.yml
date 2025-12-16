@@ -1,0 +1,5 @@
+pod_kill_targets:
+  - frontend
+  - checkoutservice
+  - cartservice
+  - paymentservice

@@ -1,0 +1,229 @@
+# ─────────────────────────────────────────────
+# 파일명: playbooks/chaos/run_cpu_stress.yml
+# 목적:
+#   - CPU 부하 Chaos (Internal / External)
+#   - Internal 우선, 실패 시 External fallback
+#   - Pod Kill 플레이북과 동일한 구조/철학
+# ─────────────────────────────────────────────
+
+- name: Run CPU Stress Chaos (Internal / External, Safe Refactor)
+  hosts: k3s_master
+  become: yes
+
+  vars_files:
+    - "{{ playbook_dir }}/../../group_vars/all.yml"
+
+  vars:
+    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(30, true) | int }}"
+    chaos_log_path_local: "/var/log/chaos_test.log"
+
+    stress_mode: "{{ lookup('env','STRESS_MODE') | default('internal', true) }}"
+    external_sa_name: "chaos-runner"
+    external_kubectl_image: "bitnami/kubectl:latest"
+
+  tasks:
+    # ─────────────────────────────────────────────
+    # 1️⃣ 안전검사 - 네임스페이스 확인
+    # ─────────────────────────────────────────────
+    - name: Safety Check - namespace
+      ansible.builtin.assert:
+        that: target_namespace == "app"
+        fail_msg: "❌ namespace가 'app'이 아닙니다."
+        success_msg: "✅ namespace 확인 완료 ('app')"
+
+    # ─────────────────────────────────────────────
+    # 2️⃣ 대상 서비스 로드 (ENV → File → Default)
+    # ─────────────────────────────────────────────
+    - name: Load target services
+      block:
+        - name: Init fallback dict
+          ansible.builtin.set_fact:
+            cpu_targets_fallback:
+              services: []
+          changed_when: false
+
+        - name: Load from ENV
+          when: env_target_services | length > 0
+          ansible.builtin.set_fact:
+            target_services: "{{ env_target_services.split(',') | map('trim') | list }}"
+          changed_when: false
+
+        - name: Load from cpu_stress_targets.yml
+          when: env_target_services | length == 0
+          block:
+            - ansible.builtin.stat:
+                path: "{{ playbook_dir }}/../../cpu_stress_targets.yml"
+              register: cpu_target_file
+
+            - ansible.builtin.include_vars:
+                file: "{{ playbook_dir }}/../../cpu_stress_targets.yml"
+                name: cpu_targets_fallback
+              when: cpu_target_file.stat.exists
+
+            - ansible.builtin.set_fact:
+                target_services: "{{ cpu_targets_fallback.services | default([]) }}"
+              changed_when: false
+
+        - name: Default empty list
+          when: target_services is not defined
+          ansible.builtin.set_fact:
+            target_services: []
+          changed_when: false
+
+    - name: Display effective target services
+      ansible.builtin.debug:
+        msg: |
+          🎯 CPU Stress Targets:
+          - ENV: {{ env_target_services | default('N/A') }}
+          - Effective: {{ target_services | default([]) }}
+          - Duration: {{ chaos_duration }}s
+
+    # ─────────────────────────────────────────────
+    # 3️⃣ Internal CPU Stress
+    # ─────────────────────────────────────────────
+    - name: Apply internal CPU stress
+      when: stress_mode == "internal"
+      ansible.builtin.shell: |
+        failed=""
+        for svc in {{ target_services | join(' ') | default('') }}; do
+          POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          if [ -z "$POD" ]; then
+            echo "[SKIP] No pod for $svc"
+            continue
+          fi
+
+          echo "[CHAOS] CPU stress on $svc ($POD)"
+
+          if kubectl exec -n {{ target_namespace }} $POD -- sh -c "command -v stress-ng" >/dev/null 2>&1; then
+            kubectl exec -n {{ target_namespace }} $POD -- \
+              stress-ng -c 2 -l 90 --timeout {{ chaos_duration }}s --metrics-brief
+          else
+            kubectl exec -n {{ target_namespace }} $POD -- sh -c '
+              yes > /dev/null &
+              yes > /dev/null &
+              PID1=$!
+              PID2=$!
+              sleep {{ chaos_duration }}
+              kill $PID1 $PID2 2>/dev/null || true
+            '
+          fi || failed="$failed $svc"
+        done
+
+        [ -n "$failed" ] && exit 99 || exit 0
+      register: internal_result
+      ignore_errors: yes
+      changed_when: true
+
+    # ─────────────────────────────────────────────
+    # 4️⃣ Internal 실패 시 External 전환
+    # ─────────────────────────────────────────────
+    - name: Switch to external mode
+      when: internal_result.rc is defined and internal_result.rc != 0
+      ansible.builtin.set_fact:
+        stress_mode: "external"
+      changed_when: true
+
+    - name: Notify fallback
+      when: stress_mode == "external"
+      ansible.builtin.debug:
+        msg: "⚠️ Internal CPU stress 실패 → External 모드 전환"
+
+    # ─────────────────────────────────────────────
+    # 5️⃣ External 모드 RBAC 준비
+    # ─────────────────────────────────────────────
+    - name: Ensure RBAC for external chaos runner
+      when: stress_mode == "external"
+      ansible.builtin.shell: |
+        cat <<'YAML' | kubectl apply -f -
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: {{ external_sa_name }}
+          namespace: {{ target_namespace }}
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: chaos-cpu-runner
+          namespace: {{ target_namespace }}
+        rules:
+          - apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["get","list"]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: chaos-cpu-runner-binding
+          namespace: {{ target_namespace }}
+        subjects:
+          - kind: ServiceAccount
+            name: {{ external_sa_name }}
+            namespace: {{ target_namespace }}
+        roleRef:
+          kind: Role
+          name: chaos-cpu-runner
+          apiGroup: rbac.authorization.k8s.io
+        YAML
+      changed_when: true
+
+    # ─────────────────────────────────────────────
+    # 6️⃣ External CPU Stress (Chaos Pod)
+    # ─────────────────────────────────────────────
+    - name: Apply external CPU stress
+      when: stress_mode == "external"
+      ansible.builtin.shell: |
+        for svc in {{ target_services | join(' ') | default('') }}; do
+          kubectl run cpu-chaos-$svc-$(date +%s) \
+            --image={{ external_kubectl_image }} \
+            --restart=Never \
+            -n {{ target_namespace }} \
+            --serviceaccount={{ external_sa_name }} \
+            --env="DURATION={{ chaos_duration }}" \
+            --command -- sh -c "
+              echo '[CHAOS] External CPU stress for {{ chaos_duration }}s';
+              yes > /dev/null &
+              yes > /dev/null &
+              sleep {{ chaos_duration }};
+              pkill yes;
+            " || true
+        done
+      changed_when: true
+      ignore_errors: yes
+
+    # ─────────────────────────────────────────────
+    # 7️⃣ 결과 검증
+    # ─────────────────────────────────────────────
+    - name: Check pod states
+      ansible.builtin.shell: |
+        kubectl get pods -n {{ target_namespace }} \
+          -o custom-columns="NAME:.metadata.name,STATUS:.status.phase" --no-headers
+      register: pod_state
+      ignore_errors: yes
+
+    # ─────────────────────────────────────────────
+    # 8️⃣ Chaos 결과 로그 기록
+    # ─────────────────────────────────────────────
+    - name: Append chaos summary to log
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path_local }}"
+        create: true
+        line: |
+          [{{ ansible_date_time.iso8601 }}] CPUChaos ns={{ target_namespace }} mode={{ stress_mode }} duration={{ chaos_duration }}s targets={{ target_services | join(',') | default('랜덤') }}
+      become: yes
+
+    # ─────────────────────────────────────────────
+    # 9️⃣ 최종 요약 출력
+    # ─────────────────────────────────────────────
+    - name: Final summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ CPU Stress Chaos 완료
+          - Mode: {{ stress_mode }}
+          - Duration: {{ chaos_duration }}s
+          - Targets: {{ target_services | join(', ') | default('랜덤 선택') }}
+          - Log: {{ chaos_log_path_local }}
+

@@ -1,1 +1,193 @@
-# chaos_cpu tasks will be added here
+# ─────────────────────────────────────────────
+# 파일: roles/chaos_cpu/tasks/main.yml
+# 목적:
+#   - internal 모드: 지정된 서비스 컨테이너 내부에 CPU 부하 주입
+#   - external 모드: 별도 Pod(alpine+stress-ng)로 서비스 단위 부하 주입
+#   - internal 실패 시 자동 external fallback
+#   - GitLab / ArgoCD 등 CI/CD 환경에서 STRESS_MODE, TARGET_SERVICES 지정 가능
+#   - 복구는 restore_all.yml에서 별도 수행
+# ─────────────────────────────────────────────
+
+- name: CPU Chaos Test (Internal / External with Auto-Fallback)  # 플레이북 명칭
+  hosts: k3s_master                                              # 실행 대상: K3s 마스터 노드
+  become: yes                                                    # root 권한 사용
+  vars:
+    target_namespace: "app"                                      # Chaos 대상 네임스페이스
+    chaos_duration: "{{ lookup('env','CHAOS_DURATION') | default(120, true) | int }}"  # 부하 지속 시간(초)
+    chaos_log_path: "/var/log/chaos_test.log"                    # Chaos 로그 저장 경로
+
+    # 기본 서비스 목록 (환경변수 미지정 시 사용)
+    default_services:
+      - frontend
+      - productcatalogservice
+      - cartservice
+      - checkoutservice
+      - paymentservice
+      - shippingservice
+      - emailservice
+      - redis-cart
+
+    # 환경변수 기반 모드 및 대상
+    stress_mode: "{{ lookup('env','STRESS_MODE') | default('internal', true) }}"  # 실행 모드 (internal / external)
+    env_target_services: "{{ lookup('env','TARGET_SERVICES') | default('', true) }}"  # 쉼표로 구분된 대상 서비스
+
+  tasks:
+    # ─────────────────────────────────────────────
+    # 1️⃣ 실행 모드 및 대상 서비스 확정
+    # ─────────────────────────────────────────────
+    - name: Compute effective mode and service list              # 환경변수 또는 기본값 기반으로 최종 모드 결정
+      ansible.builtin.set_fact:
+        effective_stress_mode: "{{ stress_mode }}"               # 모드 확정 (internal / external)
+        effective_target_services: >-                            # 서비스 목록 확정
+          {{
+            (env_target_services.split(',') | map('trim') | list)
+            if env_target_services | length > 0                  # 환경변수 지정 시 해당 서비스 사용
+            else default_services                                # 미지정 시 기본 서비스 사용
+          }}
+      changed_when: false                                        # 시스템 상태 변경 없음
+
+    - name: Display chaos configuration                          # 현재 설정 확인용 디버그 출력
+      ansible.builtin.debug:
+        msg: |
+          ⚙️ Chaos Configuration
+          - Namespace: {{ target_namespace }}
+          - Mode: {{ effective_stress_mode }}
+          - Duration: {{ chaos_duration }}s
+          - Targets: {{ effective_target_services | join(', ') }}
+
+    # ─────────────────────────────────────────────
+    # 2️⃣ 네임스페이스 검증
+    # ─────────────────────────────────────────────
+    - name: Validate target_namespace                            # 안전성 검증
+      ansible.builtin.assert:
+        that:
+          - target_namespace == "app"                            # 'app' 네임스페이스에서만 실행 허용
+        fail_msg: "❌ namespace가 'app'이 아닙니다. Chaos는 app 내에서만 허용됩니다."
+        success_msg: "✅ namespace 확인 완료"                      # 통과 시 메시지 출력
+
+    - name: Confirm namespace context                            # 네임스페이스 확인 로그
+      ansible.builtin.debug:
+        msg: "네임스페이스 확인됨: {{ target_namespace }}"
+
+    # ─────────────────────────────────────────────
+    # 3️⃣ Internal 모드 실행 (Pod 내부 CPU 부하)
+    # ─────────────────────────────────────────────
+    - name: Inject CPU stress (internal mode)                    # internal 모드 실행 블록
+      when: effective_stress_mode == "internal"                  # 조건: internal 모드일 때만 수행
+      ansible.builtin.shell: |
+        failed_services=""                                       # 실패한 서비스명을 저장할 변수 초기화
+
+        # 모든 서비스 반복 수행
+        for svc in {{ effective_target_services | join(' ') }}; do
+          echo "[INFO] Checking pod for $svc..."                 # 현재 서비스 로그 출력
+
+          # 현재 서비스(app=$svc) 라벨을 가진 Pod 중 첫 번째를 가져옴
+          POD=$(kubectl get pod -n {{ target_namespace }} -l app=$svc \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          # Pod가 존재하지 않으면 스킵
+          if [ -z "$POD" ]; then
+            echo "[SKIP] No running pod for $svc"
+            continue
+          fi
+
+          echo "[CHAOS] Injecting CPU stress into $svc ($POD)..."
+
+          # Pod 내부에서 CPU 부하 수행
+          kubectl exec -n {{ target_namespace }} $POD -- sh -c '
+            if command -v yes >/dev/null 2>&1; then              # 'yes' 명령이 존재하는지 확인
+              yes > /dev/null &                                  # yes 명령으로 CPU 100% 부하 발생
+              PID=$!                                            # yes 프로세스의 PID 저장
+              sleep {{ chaos_duration }}                         # 지정된 시간 동안 유지
+              kill $PID 2>/dev/null || true                     # 프로세스 종료 (실패 무시)
+              echo "[DONE] CPU stress completed for $svc"        # 완료 로그 출력
+            else
+              echo "[WARN] yes command not found in container for $svc"  # yes 명령 없음
+              exit 42                                            # 실패 코드 42 반환 (fallback 트리거)
+            fi
+          ' || failed_services="$failed_services $svc"           # 실패한 서비스 누적 기록
+        done
+
+        # 내부 실패 감지 (하나라도 실패 시 종료 코드 99 반환)
+        if [ -n "$failed_services" ]; then
+          echo "[ERROR] Internal mode failed for:$failed_services"
+          exit 99
+        fi
+      register: internal_stress_result                           # 실행 결과 저장
+      ignore_errors: yes                                         # 오류 발생해도 플레이 중단하지 않음
+      changed_when: true                                         # 시스템 상태 변경으로 간주
+
+    # ─────────────────────────────────────────────
+    # 4️⃣ Internal 실패 시 External로 자동 전환
+    # ─────────────────────────────────────────────
+    - name: Switch to external if internal fails                 # 내부 실패 감지 후 모드 전환
+      when:
+        - effective_stress_mode == "internal"                    # 현재 모드가 internal일 때만
+        - internal_stress_result.rc is defined                   # 결과 코드가 존재해야 함
+        - internal_stress_result.rc != 0                         # 실패 코드일 경우에만 전환
+      ansible.builtin.set_fact:
+        effective_stress_mode: "external"                        # external 모드로 변경
+      changed_when: true                                         # fact 변경으로 표시
+
+    - name: Notify fallback activation                           # fallback 활성화 안내 메시지
+      when: effective_stress_mode == "external"                  # external로 전환된 경우에만
+      ansible.builtin.debug:
+        msg: "⚠️ Internal stress injection failed — switching to EXTERNAL mode."
+
+    # ─────────────────────────────────────────────
+    # 5️⃣ External 모드 실행 (별도 stress-ng Pod)
+    # ─────────────────────────────────────────────
+    - name: External CPU stress via helper pods                  # external 모드 실행 블록
+      when: effective_stress_mode == "external"                  # 조건: external 모드일 때만 수행
+      ansible.builtin.shell: |
+        echo "[INFO] Launching external CPU stress pods..."      # 실행 로그 출력
+
+        # 대상 서비스 반복
+        for svc in {{ effective_target_services | join(' ') }}; do
+          echo "[TARGET] Launching external stress pod for $svc" # 서비스 단위 실행 로그
+          SUFFIX=$(cat /proc/sys/kernel/random/uuid | cut -c1-6) # 무작위 UUID 접미사로 이름 충돌 방지
+
+          # stress-ng를 실행할 chaos pod 생성
+          kubectl run cpu-stress-$svc-$SUFFIX \                  # Pod 이름: cpu-stress-서비스명-랜덤ID
+            --image=alpine:3.19 \                                # 경량 alpine 이미지 사용
+            --restart=Never \                                    # 단발성 Pod로 실행
+            -n {{ target_namespace }} \                          # 네임스페이스 지정
+            --labels="chaos-target=$svc" \                       # Chaos 대상 서비스 라벨 추가
+            --command -- sh -c '
+              set -eux;                                          # 에러 발생 시 중단 + 디버그 출력
+              apk add --no-cache stress-ng || (echo "[WARN] apk install failed, retrying..." && apk update && apk add --no-cache stress-ng);  # stress-ng 설치 (재시도 포함)
+              echo "[CHAOS] Running stress-ng for {{ chaos_duration }}s on ${svc}...";  # 실행 로그
+              stress-ng -c 0 -l 100 --matrix 64 --vm 16 --vm-bytes 95% --hdd 4 \
+                --timeout {{ chaos_duration }}s --metrics-brief || echo "[WARN] stress-ng encountered non-critical error";  # 실행 중 경고 무시
+              echo "[DONE] CPU stress complete for ${svc}";       # 완료 로그 출력
+              sleep 1;                                            # 종료 전 대기
+            ' || true                                             # 실패해도 전체 중단 방지
+        done
+      register: external_stress_result                           # 실행 결과 저장
+      ignore_errors: yes                                         # 오류 무시 (다음 Task로 진행)
+      changed_when: true                                         # 시스템 변경 발생으로 표시
+
+    # ─────────────────────────────────────────────
+    # 6️⃣ Chaos 로그 기록 (실행 및 모드 결과)
+    # ─────────────────────────────────────────────
+    - name: Write chaos execution summary                        # 로그 파일에 실행 결과 기록
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path }}"                              # 로그 파일 경로
+        create: yes                                               # 파일이 없으면 생성
+        line: |                                                   # 로그 내용 포맷 (한 줄)
+          [{{ ansible_date_time.iso8601 }}] ChaosCPU ns={{ target_namespace }} mode={{ effective_stress_mode }} duration={{ chaos_duration }}s targets={{ effective_target_services | join(',') }}
+      become: yes                                                 # root 권한 필요 (시스템 경로 접근)
+
+    # ─────────────────────────────────────────────
+    # 7️⃣ 최종 요약 출력
+    # ─────────────────────────────────────────────
+    - name: Print final chaos summary                             # 콘솔 출력용 요약 메시지
+      ansible.builtin.debug:
+        msg: |                                                    # 멀티라인 출력
+          ✅ CPU Chaos Injection Finished
+          - Final Mode: {{ effective_stress_mode }}               # 실제 실행된 모드
+          - Duration: {{ chaos_duration }}s                       # 부하 지속 시간
+          - Namespace: {{ target_namespace }}                     # Chaos 수행 네임스페이스
+          - Targets: {{ effective_target_services | join(', ') }} # 실제 대상 서비스 목록
+          - Log: {{ chaos_log_path }}                             # 로그 파일 경로
+          - Recovery handled by restore_all.yml                   # 복구는 별도 수행

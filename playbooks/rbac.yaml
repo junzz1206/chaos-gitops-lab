@@ -1,0 +1,34 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  namespace: app
+  name: account-app-manager-zawvp
+
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: app
+  name: role-app-manager-zawvp
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["chaos-mesh.org"]
+  resources: [ "*" ]
+  verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bind-app-manager-zawvp
+  namespace: app
+subjects:
+- kind: ServiceAccount
+  name: account-app-manager-zawvp
+  namespace: app
+roleRef:
+  kind: Role
+  name: role-app-manager-zawvp
+  apiGroup: rbac.authorization.k8s.io

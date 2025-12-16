@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────
+# 파일: playbooks/chaos/run_chaos_test.yml
+# 목적:
+#   - "영구 장애 유지형" Chaos 오케스트레이션
+#   - ArgoCD selfHeal 비활성화로 자동 복구 차단
+#   - 지정 서비스 Deployment를 scale=0으로 내려 OutOfSync 유지 → Alertmanager 감지
+#   - run_pod_kill.yml은 부가(옵션). 핵심 장애는 scale=0
+# ─────────────────────────────────────────────
+
+- name: Run Chaos Injection (Persistent Failure)
+  hosts: k3s_master
+  become: true
+
+  vars:
+    # ✅ 고정값 (원하면 여기만 바꾸면 됨)
+    target_namespace: "app"
+    chaos_duration: 90   # seconds
+    argocd_ns: "argocd"
+    argocd_app: "chaos-engineering"
+
+    # 영구 장애로 만들 서비스 (원하면 추가/삭제)
+    persistent_outage_services:
+      - cartservice
+      - frontend
+      - paymentservice
+
+    # PodKill도 같이 돌릴지 여부 (원하면 false)
+    run_pod_kill: true
+
+  tasks:
+    # 1) 안전 검사
+    - name: Safety Check - namespace
+      ansible.builtin.assert:
+        that:
+          - target_namespace == "app"
+        fail_msg: "❌ namespace가 'app'이 아닙니다."
+        success_msg: "✅ namespace 확인 완료 ('app')"
+
+    # 2) ArgoCD Self-Heal OFF (자동 복구 차단)
+    - name: Disable ArgoCD self-heal (prevent auto recovery)
+      ansible.builtin.shell: |
+        set -e
+        echo "[ARGOCD] Disable selfHeal for app={{ argocd_app }}"
+        kubectl -n {{ argocd_ns }} patch application {{ argocd_app }} --type merge -p '{
+          "spec": {
+            "syncPolicy": {
+              "automated": {
+                "selfHeal": false,
+                "prune": true
+              }
+            }
+          }
+        }'
+      changed_when: true
+
+    # 3) 시작 안내
+    - name: Announce chaos start
+      ansible.builtin.debug:
+        msg: |
+          🚀 Chaos Test 시작
+          - Namespace: {{ target_namespace }}
+          - Duration: {{ chaos_duration }}s
+          - Mode: Persistent Failure (No Self-Healing)
+          - ArgoCD: selfHeal=false
+          - Persistent Outage Services: {{ persistent_outage_services | join(', ') }}
+          - Recovery: restore_all.yml only
+
+    # 4) (옵션) Pod Kill 실행
+    - name: Run Pod Kill Chaos (optional)
+      when: run_pod_kill | bool
+      ansible.builtin.command:
+        cmd: ansible-playbook {{ playbook_dir }}/run_pod_kill.yml
+      register: pod_kill_result
+      ignore_errors: true
+      changed_when: true
+
+    # 5) 🔥 영구 장애 주입: Deployment scale=0
+    - name: Force persistent service outage (scale=0)
+      ansible.builtin.shell: |
+        set -e
+        echo "[CHAOS] Scaling down deployments to 0 (persistent outage)"
+        for svc in {{ persistent_outage_services | join(' ') }}; do
+          if kubectl -n {{ target_namespace }} get deploy "$svc" >/dev/null 2>&1; then
+            echo "  - scale deploy/$svc -> 0"
+            kubectl -n {{ target_namespace }} scale deploy "$svc" --replicas=0
+          else
+            echo "  - WARN: deploy/$svc not found (skip)"
+          fi
+        done
+      changed_when: true
+
+    # 6) 상태 출력
+    - name: Show deployment state after chaos
+      ansible.builtin.shell: |
+        kubectl get deploy -n {{ target_namespace }}
+      register: deploy_state
+      changed_when: false
+
+    - name: Injection summary
+      ansible.builtin.debug:
+        msg: |
+          🔥 Chaos Injected (Persistent)
+          {{ deploy_state.stdout }}
+
+- name: Hold Chaos Window (Controller Only)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    chaos_duration: 90   # ✅ 위와 동일하게 맞춰둠 (원하면 같이 수정)
+  tasks:
+    - name: Hold failure window for Alertmanager
+      ansible.builtin.pause:
+        seconds: "{{ chaos_duration }}"
+

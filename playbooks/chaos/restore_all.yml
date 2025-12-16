@@ -1,0 +1,186 @@
+# ─────────────────────────────────────────────
+# 파일: playbooks/chaos/restore_all.yml
+# 목적:
+#   - Chaos Mesh 정리 + ArgoCD 강제 Sync(kubectl-only)로 GitOps 정석 복구
+#   - operation.sync 트리거 → Succeeded 대기 → Synced/Healthy 대기 (3단계)
+# ─────────────────────────────────────────────
+
+- name: 🔄 Unified GitOps Recovery via ArgoCD (kubectl-only, stable wait)
+  hosts: k3s_master
+  become: true
+
+  vars:
+    target_namespace: "app"
+    chaos_log_path: "/var/log/chaos_recovery.log"
+
+    argocd_ns: "argocd"
+    argocd_app: "chaos-engineering"
+
+    # 타임아웃(초)
+    op_timeout: 300
+    sync_timeout: 300
+    poll_interval: 5
+
+    # 강제 sync 옵션 (필요시 추가 가능)
+    argocd_sync_options:
+      - "Prune=true"
+      - "ApplyOutOfSyncOnly=true"
+      - "Replace=true"
+
+  tasks:
+    # 1) Safety
+    - name: Validate namespace safety
+      ansible.builtin.assert:
+        that:
+          - target_namespace == "app"
+        fail_msg: "❌ namespace가 'app'이 아닙니다."
+        success_msg: "✅ namespace 확인 완료 ({{ target_namespace }})"
+
+    # 2) Chaos Mesh CR 정리
+    - name: Remove all Chaos Mesh experiments
+      ansible.builtin.shell: |
+        set -e
+        echo "[CLEANUP] Deleting Chaos Mesh CRs in {{ target_namespace }}..."
+        kubectl -n {{ target_namespace }} delete networkchaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete stresschaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete podchaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete iochaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete httpchaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete dnschaos --all --ignore-not-found
+        kubectl -n {{ target_namespace }} delete timechaos --all --ignore-not-found
+        echo "[OK] Chaos Mesh experiments removed."
+      register: chaos_cleanup
+      changed_when: true
+
+    - name: Show chaos cleanup result
+      ansible.builtin.debug:
+        var: chaos_cleanup.stdout_lines
+
+    # 3) helper pod 정리 (prefix 패턴)
+    - name: Remove leftover chaos helper pods
+      ansible.builtin.shell: |
+        set -e
+        echo "[CLEANUP] Removing chaos helper pods..."
+        PODS=$(kubectl get pods -n {{ target_namespace }} -o name | \
+          grep -E '^pod/(cpu|net|network|svc|kill|chaos)-' || true)
+        if [ -n "$PODS" ]; then
+          echo "$PODS" | while read -r p; do
+            kubectl delete "$p" -n {{ target_namespace }} --force --grace-period=0 || true
+          done
+        else
+          echo "[INFO] No chaos helper pods found."
+        fi
+      register: helper_cleanup
+      changed_when: true
+
+    - name: Show helper pod cleanup result
+      ansible.builtin.debug:
+        var: helper_cleanup.stdout_lines
+
+    # 4) Application 존재 확인
+    - name: Check ArgoCD Application exists
+      ansible.builtin.shell: |
+        kubectl -n {{ argocd_ns }} get application {{ argocd_app }} >/dev/null 2>&1
+      changed_when: false
+
+    # 5) ✅ kubectl-only 강제 Sync 트리거 (operation.sync)
+    - name: Trigger ArgoCD sync via operation.sync (force options)
+      ansible.builtin.shell: |
+        set -e
+        echo "[SYNC] Triggering operation.sync for {{ argocd_app }}..."
+        kubectl -n {{ argocd_ns }} patch application {{ argocd_app }} --type merge -p '{
+          "operation": {
+            "sync": {
+              "prune": true,
+              "syncOptions": {{ argocd_sync_options | to_json }}
+            }
+          }
+        }'
+      changed_when: true
+
+    # 6) ✅ (1) operationState.phase Succeeded까지 대기
+    - name: Wait until ArgoCD operationState.phase == Succeeded
+      ansible.builtin.shell: |
+        set -e
+        echo "[WAIT] Waiting operationState.phase=Succeeded ..."
+        end=$(( $(date +%s) + {{ op_timeout }} ))
+        while [ $(date +%s) -lt $end ]; do
+          phase=$(kubectl -n {{ argocd_ns }} get application {{ argocd_app }} \
+            -o jsonpath='{.status.operationState.phase}' 2>/dev/null || echo "")
+          echo "  phase=${phase}"
+          if [ "$phase" = "Succeeded" ]; then
+            echo "[OK] operationState.phase=Succeeded"
+            exit 0
+          fi
+          sleep {{ poll_interval }}
+        done
+        echo "[FAIL] Timeout waiting operationState.phase=Succeeded"
+        exit 1
+      changed_when: false
+
+    # 7) ✅ (2) Synced & Healthy까지 대기
+    - name: Wait until ArgoCD app is Synced & Healthy
+      ansible.builtin.shell: |
+        set -e
+        echo "[WAIT] Waiting sync=Synced & health=Healthy ..."
+        end=$(( $(date +%s) + {{ sync_timeout }} ))
+        while [ $(date +%s) -lt $end ]; do
+          sync=$(kubectl -n {{ argocd_ns }} get application {{ argocd_app }} \
+            -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Unknown")
+          health=$(kubectl -n {{ argocd_ns }} get application {{ argocd_app }} \
+            -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Unknown")
+          echo "  sync=${sync} health=${health}"
+          if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+            echo "[OK] ArgoCD app is Synced & Healthy"
+            exit 0
+          fi
+          sleep {{ poll_interval }}
+        done
+        echo "[FAIL] Timeout waiting Synced/Healthy"
+        exit 1
+      changed_when: false
+
+    # 8) selfHeal 다시 ON (정상 운영 복귀)
+    - name: Re-enable ArgoCD self-heal after recovery
+      ansible.builtin.shell: |
+        set -e
+        echo "[ARGOCD] Re-enable selfHeal for app={{ argocd_app }}"
+        kubectl -n {{ argocd_ns }} patch application {{ argocd_app }} --type merge -p '{
+          "spec": {
+            "syncPolicy": {
+              "automated": {
+                "selfHeal": true,
+                "prune": true
+              }
+            }
+          }
+        }'
+      changed_when: true
+
+    # 9) 최종 상태 출력
+    - name: Get final deployment status
+      ansible.builtin.shell: |
+        kubectl get deployments -n {{ target_namespace }} \
+          -o custom-columns="NAME:.metadata.name,READY:.status.readyReplicas,DESIRED:.spec.replicas" --no-headers
+      register: final_status
+      changed_when: false
+
+    - name: Show final deployment summary
+      ansible.builtin.debug:
+        msg: |
+          ✅ GitOps 기반 Chaos Recovery 완료 (kubectl-only)
+          - ArgoCD App: {{ argocd_app }}
+          - Namespace: {{ target_namespace }}
+          - Final Deployment Status:
+          {{ final_status.stdout | default('정보 없음') }}
+
+    # 10) 로그 기록
+    - name: Write recovery log
+      ansible.builtin.lineinfile:
+        path: "{{ chaos_log_path }}"
+        create: true
+        line: |
+          [{{ ansible_date_time.iso8601 }}] Recovery OK app={{ argocd_app }} ns={{ target_namespace }} status="{{ final_status.stdout | default('') | replace('\n','; ') }}"
+      become: true
+      ignore_errors: true
+
