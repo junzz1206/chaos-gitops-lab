@@ -1,40 +1,27 @@
-# --- Kube-Prometheus-Stack ---
 kube-prometheus-stack:
   grafana:
     service:
       type: NodePort
       nodePort: 32000
     sidecar:
-      dashboards:
-        enabled: true
-        label: grafana_dashboard
-        labelValue: "1"
       datasources:
         enabled: true
         defaultDatasourceEnabled: true
     additionalDataSources:
       - name: Loki
         type: loki
-        uid: Loki
         url: http://loki:3100
         access: proxy
-        jsonData:
-          maxLines: 1000
-  prometheus:
-    service:
-      type: NodePort
-      nodePort: 32001
-  alertmanager:
-    service:
-      type: NodePort
-      nodePort: 32002
 
-# --- Loki (Version 2.9.x Fixed Structure) ---
 loki:
-  # [중요] 3.0과 달리 'loki:'를 중첩하지 않고 바로 설정을 씁니다.
+  # 2.9 버전은 loki: 밑에 바로 설정이 와야 함 (loki: loki: 금지)
   auth_enabled: false
   
-  # 1. 권한 설정 (User 10001)
+  commonConfig:
+    replication_factor: 1
+    path_prefix: /var/loki
+
+  # 권한 설정 (User 10001)
   podSecurityContext:
     runAsGroup: 10001
     runAsUser: 10001
@@ -47,35 +34,20 @@ loki:
     capabilities:
       drop: ["ALL"]
 
-  # 2. 데이터 저장소 설정 (2.9 방식)
+  # 저장소 설정
   persistence:
     enabled: true
     size: 10Gi
-  
-  # 3. 상세 설정
-  config:
-    auth_enabled: false
-    common:
-      path_prefix: /var/loki
-      replication_factor: 1
-    storage_config:
-      boltdb_shipper:
-        active_index_directory: /var/loki/index
-        cache_location: /var/loki/index_cache
-        shared_store: filesystem
-      filesystem:
-        directory: /var/loki/chunks
-    schema_config:
-      configs:
-        - from: "2024-01-01"
-          store: boltdb-shipper
-          object_store: filesystem
-          schema: v11
-          index:
-            prefix: loki_index_
-            period: 24h
 
-# --- Promtail ---
+  # 불필요한 기능 끄기
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+  monitoring:
+    selfMonitoring:
+      enabled: false
+
 promtail:
   config:
     clients:
