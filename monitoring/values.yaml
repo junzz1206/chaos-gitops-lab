@@ -29,16 +29,11 @@ kube-prometheus-stack:
       type: NodePort
       nodePort: 32002
 
-# --- Loki (Final Fix: Root + Metadata Off) ---
+# --- Loki (Version 2.9.x Configuration) ---
 loki:
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false
-    
-    # [핵심 1] 에러 로그 해결: 구조화된 메타데이터 기능 끄기
-    limits_config:
-      allow_structured_metadata: false
-
     commonConfig:
       replication_factor: 1
     schemaConfig:
@@ -46,14 +41,14 @@ loki:
         - from: "2024-01-01"
           store: boltdb-shipper
           object_store: filesystem
-          schema: v13
+          schema: v11  # v13에서 v11로 안정화
           index:
             prefix: loki_index_
             period: 24h
     storage:
       type: filesystem
     
-    # [핵심 2] 권한 문제 해결: Root 사용자로 실행
+    # 권한 문제 해결을 위해 Root 실행 유지
     podSecurityContext:
       runAsGroup: 0
       runAsUser: 0
@@ -67,7 +62,7 @@ loki:
       enabled: true
       size: 10Gi
   
-  # 불필요 컴포넌트 정리
+  # 불필요 컴포넌트 비활성화
   read: {replicas: 0}
   write: {replicas: 0}
   backend: {replicas: 0}
