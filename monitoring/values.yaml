@@ -1,29 +1,17 @@
 kube-prometheus-stack:
-  alertmanager:
-    enabled: false
-
   grafana:
-    adminPassword: admin
+    adminPassword: "admin"
     service:
       type: NodePort
       nodePort: 32000
+    defaultDashboardsEnabled: true
 
   prometheus:
-    prometheusSpec:
-      retention: 6h
-      scrapeInterval: 30s
-      evaluationInterval: 30s
-      resources:
-        requests:
-          cpu: 200m
-          memory: 512Mi
-        limits:
-          cpu: 500m
-          memory: 1Gi
+    service:
+      type: NodePort
+      nodePort: 32001
 
-  kubeStateMetrics:
-    enabled: true
-
-  nodeExporter:
-    enabled: true
-
+  alertmanager:
+    service:
+      type: NodePort
+      nodePort: 32002

@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────
 # 파일: playbooks/chaos/restore_all.yml
 # 목적:
-#   - Chaos Mesh 정리 + ArgoCD 강제 Sync(kubectl-only)로 GitOps 정석 복구
+#   - Chaos Mesh 정리 + (Fortio 트래픽 생성기 정리) + ArgoCD 강제 Sync(kubectl-only)로 GitOps 정석 복구
 #   - operation.sync 트리거 → Succeeded 대기 → Synced/Healthy 대기 (3단계)
 # ─────────────────────────────────────────────
 
@@ -21,7 +21,12 @@
     sync_timeout: 300
     poll_interval: 5
 
+    # Fortio 트래픽 생성기 리소스 이름 (Job/Deployment 둘 다 정리)
+    fortio_job_name: "fortio-load"
+    fortio_deploy_name: "fortio-loadgen"
+
     # 강제 sync 옵션 (필요시 추가 가능)
+    # 주의: syncOptions는 문자열 배열
     argocd_sync_options:
       - "Prune=true"
       - "ApplyOutOfSyncOnly=true"
@@ -77,6 +82,21 @@
       ansible.builtin.debug:
         var: helper_cleanup.stdout_lines
 
+    # 3.5) ✅ Fortio 트래픽 생성기 정리 (Deployment + Job)
+    - name: Cleanup Fortio traffic generator (Deployment/Job)
+      ansible.builtin.shell: |
+        set -e
+        echo "[CLEANUP] Removing fortio traffic generator..."
+        kubectl -n {{ target_namespace }} delete deploy/{{ fortio_deploy_name }} --ignore-not-found
+        kubectl -n {{ target_namespace }} delete job/{{ fortio_job_name }} --ignore-not-found
+        echo "[OK] Fortio cleanup done."
+      register: fortio_cleanup
+      changed_when: true
+
+    - name: Show fortio cleanup result
+      ansible.builtin.debug:
+        var: fortio_cleanup.stdout_lines
+
     # 4) Application 존재 확인
     - name: Check ArgoCD Application exists
       ansible.builtin.shell: |
@@ -112,6 +132,11 @@
             echo "[OK] operationState.phase=Succeeded"
             exit 0
           fi
+          # Failed/Error도 빠르게 감지하고 끝내고 싶으면 아래 주석 해제
+          # if [ "$phase" = "Failed" ] || [ "$phase" = "Error" ]; then
+          #   echo "[FAIL] operationState.phase=${phase}"
+          #   exit 2
+          # fi
           sleep {{ poll_interval }}
         done
         echo "[FAIL] Timeout waiting operationState.phase=Succeeded"
