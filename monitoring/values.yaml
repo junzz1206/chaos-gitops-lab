@@ -29,52 +29,54 @@ kube-prometheus-stack:
       type: NodePort
       nodePort: 32002
 
-# --- Loki (Version 2.9.x + User 10001 Config) ---
+# --- Loki 3.0 Config (성공한 설정 복구) ---
 loki:
-  # 1. 권한 설정 (User 10001)
-  podSecurityContext:
-    runAsGroup: 10001
-    runAsUser: 10001
-    fsGroup: 10001
-  
-  containerSecurityContext:
-    readOnlyRootFilesystem: false
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-
-  # 2. 불필요한 카나리 비활성화
-  lokiCanary:
-    enabled: false
-  
-  # 3. 데이터 저장소 설정
-  persistence:
-    enabled: true
-    size: 10Gi
-  
-  # 4. Loki 설정 (2.9 호환)
-  config:
+  deploymentMode: SingleBinary
+  loki:
     auth_enabled: false
-    common:
-      path_prefix: /var/loki
+    # [핵심] 3.0 에러 방지 설정
+    limits_config:
+      allow_structured_metadata: false
+    commonConfig:
       replication_factor: 1
-    storage_config:
-      boltdb_shipper:
-        active_index_directory: /var/loki/index
-        cache_location: /var/loki/index_cache
-        shared_store: filesystem
-      filesystem:
-        directory: /var/loki/chunks
-    schema_config:
+    schemaConfig:
       configs:
         - from: "2024-01-01"
           store: boltdb-shipper
           object_store: filesystem
-          schema: v11
+          schema: v13
           index:
             prefix: loki_index_
             period: 24h
+    storage:
+      type: filesystem
+    
+    # [핵심] 권한 문제 해결 설정
+    podSecurityContext:
+      runAsGroup: 0
+      runAsUser: 0
+      fsGroup: 0
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+  
+  # 불필요 컴포넌트 정리
+  read: {replicas: 0}
+  write: {replicas: 0}
+  backend: {replicas: 0}
+  gateway: {replicas: 0}
+  lokiCanary: {enabled: false}
+  test: {enabled: false}
+  monitoring:
+    selfMonitoring: {enabled: false}
+  
+  chunksCache:
+    enabled: false
 
 # --- Promtail ---
 promtail:
