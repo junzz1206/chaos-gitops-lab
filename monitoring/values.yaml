@@ -29,9 +29,9 @@ kube-prometheus-stack:
       type: NodePort
       nodePort: 32002
 
-# --- Loki (Version 2.9.x Correct Config) ---
+# --- Loki (Version 2.9.x + User 10001 Config) ---
 loki:
-  # 1. Root 권한 제거 -> Loki 전용 유저(10001) 사용
+  # 1. 권한 설정 (User 10001)
   podSecurityContext:
     runAsGroup: 10001
     runAsUser: 10001
@@ -44,16 +44,16 @@ loki:
     capabilities:
       drop: ["ALL"]
 
-  # 2. 불필요한 카나리(Canary) 파드 비활성화
+  # 2. 불필요한 카나리 비활성화
   lokiCanary:
     enabled: false
   
-  # 3. 데이터 저장소 설정 (2.9 버전 방식)
+  # 3. 데이터 저장소 설정
   persistence:
     enabled: true
     size: 10Gi
   
-  # 4. Loki 설정
+  # 4. Loki 설정 (2.9 호환)
   config:
     auth_enabled: false
     common:
