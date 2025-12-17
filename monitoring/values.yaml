@@ -10,61 +10,55 @@ kube-prometheus-stack:
     additionalDataSources:
       - name: Loki
         type: loki
+        uid: Loki
         url: http://loki:3100
         access: proxy
+        jsonData:
+          maxLines: 1000
 
-# --- Loki 2.9 충돌 해결 설정 ---
+# --- [검증된 Loki 3.0 설정] ---
 loki:
-  # [핵심] 모드를 'SingleBinary'로 명확히 지정
+  # 1. 배포 모드: 단일 바이너리 (복잡한 MSA 모드 비활성화)
   deploymentMode: SingleBinary
-  
-  # 1. SingleBinary만 1개 띄움
+
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    # [중요] 3.0 버전 필수 스키마 (tsdb v13)
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    # [핵심 1] 3.0 실행 에러 방지 (이거 없으면 100% 죽음)
+    limits_config:
+      allow_structured_metadata: false
+
+  # [핵심 2] 권한 문제 해결 (Root=0 대신 10001 사용)
   singleBinary:
     replicas: 1
     persistence:
       enabled: true
       size: 10Gi
+    podSecurityContext:
+      fsGroup: 10001
+      runAsGroup: 10001
+      runAsUser: 10001
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
 
-  # [에러 해결] 충돌나는 다른 모드(Scalable)는 전부 0개로 설정
-  read:
-    replicas: 0
-  write:
-    replicas: 0
-  backend:
-    replicas: 0
-  ingester:
-    replicas: 0
-  querier:
-    replicas: 0
-  queryFrontend:
-    replicas: 0
-  queryScheduler:
-    replicas: 0
-  distributor:
-    replicas: 0
-  compactor:
-    replicas: 0
-  indexGateway:
-    replicas: 0
-  bloomCompactor:
-    replicas: 0
-  bloomGateway:
-    replicas: 0
-
-  # 권한 설정 (User 10001)
-  podSecurityContext:
-    runAsGroup: 10001
-    runAsUser: 10001
-    fsGroup: 10001
-  
-  containerSecurityContext:
-    readOnlyRootFilesystem: false
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
-      
-  # 기타 잡다한 기능 끄기
+  # 잡다한 기능 비활성화 (에러 요인 제거)
   lokiCanary:
     enabled: false
   test:
@@ -72,7 +66,20 @@ loki:
   monitoring:
     selfMonitoring:
       enabled: false
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+  gateway:
+    enabled: false
+  backend:
+    replicas: 0
+  read:
+    replicas: 0
+  write:
+    replicas: 0
 
+# --- Promtail 설정 ---
 promtail:
   config:
     clients:
