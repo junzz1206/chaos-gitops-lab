@@ -1,4 +1,5 @@
 kube-prometheus-stack:
+  # 1. Grafana 설정
   grafana:
     service:
       type: NodePort
@@ -7,80 +8,24 @@ kube-prometheus-stack:
       datasources:
         enabled: true
         defaultDatasourceEnabled: true
-    additionalDataSources:
-      - name: Loki
-        type: loki
-        uid: Loki
-        url: http://loki:3100
-        access: proxy
-        jsonData:
-          maxLines: 1000
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+    # (중요) Loki 데이터소스 연결 부분 삭제됨
 
-# --- [검증된 Loki 3.0 설정] ---
-loki:
-  # 1. 배포 모드: 단일 바이너리 (복잡한 MSA 모드 비활성화)
-  deploymentMode: SingleBinary
+  # 2. Prometheus 설정
+  prometheus:
+    service:
+      type: NodePort
+      nodePort: 32001
+    prometheusSpec:
+      serviceMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}
 
-  loki:
-    auth_enabled: false
-    commonConfig:
-      replication_factor: 1
-    storage:
-      type: filesystem
-    # [중요] 3.0 버전 필수 스키마 (tsdb v13)
-    schemaConfig:
-      configs:
-        - from: "2024-01-01"
-          store: tsdb
-          object_store: filesystem
-          schema: v13
-          index:
-            prefix: index_
-            period: 24h
-    # [핵심 1] 3.0 실행 에러 방지 (이거 없으면 100% 죽음)
-    limits_config:
-      allow_structured_metadata: false
-
-  # [핵심 2] 권한 문제 해결 (Root=0 대신 10001 사용)
-  singleBinary:
-    replicas: 1
-    persistence:
-      enabled: true
-      size: 10Gi
-    podSecurityContext:
-      fsGroup: 10001
-      runAsGroup: 10001
-      runAsUser: 10001
-    containerSecurityContext:
-      readOnlyRootFilesystem: false
-      runAsNonRoot: true
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
-
-  # 잡다한 기능 비활성화 (에러 요인 제거)
-  lokiCanary:
-    enabled: false
-  test:
-    enabled: false
-  monitoring:
-    selfMonitoring:
-      enabled: false
-  chunksCache:
-    enabled: false
-  resultsCache:
-    enabled: false
-  gateway:
-    enabled: false
-  backend:
-    replicas: 0
-  read:
-    replicas: 0
-  write:
-    replicas: 0
-
-# --- Promtail 설정 ---
-promtail:
-  config:
-    clients:
-      - url: http://loki:3100/loki/api/v1/push
+  # 3. Alertmanager 설정
+  alertmanager:
+    service:
+      type: NodePort
+      nodePort: 32002
