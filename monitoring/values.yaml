@@ -29,13 +29,13 @@ kube-prometheus-stack:
       type: NodePort
       nodePort: 32002
 
-# --- Loki (Fix: Disable Structured Metadata) ---
+# --- Loki (Final Fix: Root + Metadata Off) ---
 loki:
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false
     
-    # [🔥 핵심 해결책] 구형 인덱스(boltdb-shipper) 사용 시 이 기능을 꺼야 함
+    # [핵심 1] 에러 로그 해결: 구조화된 메타데이터 기능 끄기
     limits_config:
       allow_structured_metadata: false
 
@@ -53,7 +53,7 @@ loki:
     storage:
       type: filesystem
     
-    # 권한 문제 방지 (Root 실행 유지)
+    # [핵심 2] 권한 문제 해결: Root 사용자로 실행
     podSecurityContext:
       runAsGroup: 0
       runAsUser: 0
@@ -67,7 +67,7 @@ loki:
       enabled: true
       size: 10Gi
   
-  # 불필요 컴포넌트 비활성화
+  # 불필요 컴포넌트 정리
   read: {replicas: 0}
   write: {replicas: 0}
   backend: {replicas: 0}
