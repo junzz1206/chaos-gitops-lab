@@ -13,33 +13,47 @@ kube-prometheus-stack:
         url: http://loki:3100
         access: proxy
 
+# --- Loki 3.0 설정 (차트 6.x 버전 구조) ---
 loki:
-  # 2.9 버전은 loki: 밑에 바로 설정이 와야 함 (loki: loki: 금지)
-  auth_enabled: false
+  deploymentMode: SingleBinary
   
-  commonConfig:
-    replication_factor: 1
-    path_prefix: /var/loki
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    storage:
+      type: filesystem
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    # [핵심] 3.0 실행 에러 방지 옵션
+    limits_config:
+      allow_structured_metadata: false
 
-  # 권한 설정 (User 10001)
-  podSecurityContext:
-    runAsGroup: 10001
-    runAsUser: 10001
-    fsGroup: 10001
-  
-  containerSecurityContext:
-    readOnlyRootFilesystem: false
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: ["ALL"]
+  # [핵심] 3.0 권한 문제 해결 (Root 대신 10001 사용)
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+    podSecurityContext:
+      fsGroup: 10001
+      runAsGroup: 10001
+      runAsUser: 10001
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
 
-  # 저장소 설정
-  persistence:
-    enabled: true
-    size: 10Gi
-
-  # 불필요한 기능 끄기
+  # 불필요한 파드 생성 방지
   lokiCanary:
     enabled: false
   test:
@@ -47,7 +61,12 @@ loki:
   monitoring:
     selfMonitoring:
       enabled: false
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
 
+# --- Promtail ---
 promtail:
   config:
     clients:
