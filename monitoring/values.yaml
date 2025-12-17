@@ -1,4 +1,4 @@
-# 1. Kube-Prometheus-Stack (Grafana + Prometheus)
+# --- Kube-Prometheus-Stack ---
 kube-prometheus-stack:
   grafana:
     service:
@@ -12,7 +12,6 @@ kube-prometheus-stack:
       datasources:
         enabled: true
         defaultDatasourceEnabled: true
-    # Loki를 데이터소스로 자동 등록
     additionalDataSources:
       - name: Loki
         type: loki
@@ -21,18 +20,16 @@ kube-prometheus-stack:
         access: proxy
         jsonData:
           maxLines: 1000
-
   prometheus:
     service:
       type: NodePort
       nodePort: 32001
-
   alertmanager:
     service:
       type: NodePort
       nodePort: 32002
 
-# 2. Loki (로그 저장소)
+# --- Loki (SingleBinary) ---
 loki:
   deploymentMode: SingleBinary
   loki:
@@ -50,28 +47,30 @@ loki:
             period: 24h
     storage:
       type: filesystem
+  
+  # [중요] 싱글 모드
   singleBinary:
     replicas: 1
     persistence:
       enabled: true
       size: 10Gi
+  
+  # [에러 해결 부분] 사용하지 않는 컴포넌트의 개수를 0으로 명시
   read:
-    enabled: false
+    replicas: 0
   write:
-    enabled: false
+    replicas: 0
   backend:
-    enabled: false
+    replicas: 0
   gateway:
-    enabled: false
-  lokiCanary:
-    enabled: false
-  test:
-    enabled: false
-  monitoring:
-    selfMonitoring:
-      enabled: false
+    replicas: 0
 
-# 3. Promtail (로그 수집기 -> Loki로 전송)
+  lokiCanary: {enabled: false}
+  test: {enabled: false}
+  monitoring:
+    selfMonitoring: {enabled: false}
+
+# --- Promtail (Logs -> Loki) ---
 promtail:
   config:
     clients:
