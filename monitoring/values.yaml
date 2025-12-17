@@ -1,10 +1,26 @@
+# 1. Kube-Prometheus-Stack (Grafana + Prometheus)
 kube-prometheus-stack:
   grafana:
-    adminPassword: "admin"
     service:
       type: NodePort
       nodePort: 32000
-    defaultDashboardsEnabled: true
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+      datasources:
+        enabled: true
+        defaultDatasourceEnabled: true
+    # Loki를 데이터소스로 자동 등록
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: Loki
+        url: http://loki:3100
+        access: proxy
+        jsonData:
+          maxLines: 1000
 
   prometheus:
     service:
@@ -15,3 +31,48 @@ kube-prometheus-stack:
     service:
       type: NodePort
       nodePort: 32002
+
+# 2. Loki (로그 저장소)
+loki:
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false
+    commonConfig:
+      replication_factor: 1
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+    storage:
+      type: filesystem
+  singleBinary:
+    replicas: 1
+    persistence:
+      enabled: true
+      size: 10Gi
+  read:
+    enabled: false
+  write:
+    enabled: false
+  backend:
+    enabled: false
+  gateway:
+    enabled: false
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+  monitoring:
+    selfMonitoring:
+      enabled: false
+
+# 3. Promtail (로그 수집기 -> Loki로 전송)
+promtail:
+  config:
+    clients:
+      - url: http://loki:3100/loki/api/v1/push

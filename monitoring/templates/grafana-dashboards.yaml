@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-grafana-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  chaos-engineering-overview.json: |
+    {
+      "title": "Chaos Engineering Overview",
+      "schemaVersion": 42,
+      "refresh": "10s",
+      "time": { "from": "now-15m", "to": "now" },
+      "panels": [
+        { "type": "row", "title": "🟩 Node & Namespace CPU / Memory", "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 } },
+        { "type": "timeseries", "title": "Node CPU Usage (%)", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 }, "targets": [ { "expr": "100 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100", "refId": "A" } ] },
+        { "type": "timeseries", "title": "Boutique Namespace Memory", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 }, "targets": [ { "expr": "sum(container_memory_working_set_bytes{namespace=\"boutique\"})", "refId": "B" } ] },
+        { "type": "row", "title": "🟩 Pod Status & Restart", "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 } },
+        { "type": "stat", "title": "Running Pods (Boutique)", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 0, "y": 10, "w": 6, "h": 6 }, "targets": [ { "expr": "count(kube_pod_status_phase{namespace=\"boutique\",phase=\"Running\"})", "refId": "A" } ] },
+        { "type": "timeseries", "title": "Pod Restart Count", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 6, "y": 10, "w": 18, "h": 6 }, "targets": [ { "expr": "sum(kube_pod_container_status_restarts_total{namespace=\"boutique\"})", "refId": "B" } ] },
+        { "type": "row", "title": "🟩 Service Latency & Error Rate", "gridPos": { "x": 0, "y": 16, "w": 24, "h": 1 } },
+        { "type": "timeseries", "title": "Checkout Latency p95", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 0, "y": 17, "w": 12, "h": 8 }, "targets": [ { "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service=\"checkout\"}[1m])) by (le))", "refId": "A" } ] },
+        { "type": "timeseries", "title": "5xx Error Rate", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 12, "y": 17, "w": 12, "h": 8 }, "targets": [ { "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m]))", "refId": "B" } ] },
+        { "type": "row", "title": "🟩 Redis Performance", "gridPos": { "x": 0, "y": 25, "w": 24, "h": 1 } },
+        { "type": "timeseries", "title": "Redis CPU Usage", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 0, "y": 26, "w": 12, "h": 8 }, "targets": [ { "expr": "rate(container_cpu_usage_seconds_total{pod=~\"redis-cart.*\"}[1m])", "refId": "A" } ] },
+        { "type": "timeseries", "title": "Redis Memory Usage", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 12, "y": 26, "w": 12, "h": 8 }, "targets": [ { "expr": "container_memory_working_set_bytes{pod=~\"redis-cart.*\"}", "refId": "B" } ] },
+        { "type": "row", "title": "🟩 Alerts & Logs", "gridPos": { "x": 0, "y": 34, "w": 24, "h": 1 } },
+        { "type": "table", "title": "Firing Alerts", "datasource": { "type": "prometheus", "uid": "Prometheus" }, "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 }, "targets": [ { "expr": "ALERTS{alertstate=\"firing\"}", "refId": "A" } ] },
+        { "type": "logs", "title": "Service Error Logs", "datasource": { "type": "loki", "uid": "Loki" }, "gridPos": { "x": 12, "y": 35, "w": 12, "h": 8 }, "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "sortOrder": "Descending" }, "targets": [ { "expr": "{namespace=\"default\"} |= \"ERROR\"", "refId": "A", "queryType": "range" } ] }
+      ]
+    }

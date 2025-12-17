@@ -1,10 +1,17 @@
 apiVersion: v2
 name: monitoring
-description: Monitoring stack for k3s (kube-prometheus-stack only)
+description: All-in-one Monitoring Stack (Prometheus + Grafana + Loki + Promtail)
 type: application
 version: 0.1.0
+appVersion: "1.0.0"
 
 dependencies:
   - name: kube-prometheus-stack
-    version: "40.1.2"
-    repository: https://prometheus-community.github.io/helm-charts
+    version: "61.3.2"
+    repository: "https://prometheus-community.github.io/helm-charts"
+  - name: loki
+    version: "6.6.2"
+    repository: "https://grafana.github.io/helm-charts"
+  - name: promtail
+    version: "6.15.3"
+    repository: "https://grafana.github.io/helm-charts"
