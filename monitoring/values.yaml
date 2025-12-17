@@ -29,11 +29,16 @@ kube-prometheus-stack:
       type: NodePort
       nodePort: 32002
 
-# --- Loki (SingleBinary) ---
+# --- Loki (Fix: Disable Structured Metadata) ---
 loki:
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false
+    
+    # [🔥 핵심 해결책] 구형 인덱스(boltdb-shipper) 사용 시 이 기능을 꺼야 함
+    limits_config:
+      allow_structured_metadata: false
+
     commonConfig:
       replication_factor: 1
     schemaConfig:
@@ -47,30 +52,35 @@ loki:
             period: 24h
     storage:
       type: filesystem
-  
-  # [중요] 싱글 모드
+    
+    # 권한 문제 방지 (Root 실행 유지)
+    podSecurityContext:
+      runAsGroup: 0
+      runAsUser: 0
+      fsGroup: 0
+    containerSecurityContext:
+      readOnlyRootFilesystem: false
+
   singleBinary:
     replicas: 1
     persistence:
       enabled: true
       size: 10Gi
   
-  # [에러 해결 부분] 사용하지 않는 컴포넌트의 개수를 0으로 명시
-  read:
-    replicas: 0
-  write:
-    replicas: 0
-  backend:
-    replicas: 0
-  gateway:
-    replicas: 0
-
+  # 불필요 컴포넌트 비활성화
+  read: {replicas: 0}
+  write: {replicas: 0}
+  backend: {replicas: 0}
+  gateway: {replicas: 0}
   lokiCanary: {enabled: false}
   test: {enabled: false}
   monitoring:
     selfMonitoring: {enabled: false}
+  
+  chunksCache:
+    enabled: false
 
-# --- Promtail (Logs -> Loki) ---
+# --- Promtail ---
 promtail:
   config:
     clients:
